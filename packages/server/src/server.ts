@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 import { Keypair } from "@stellar/stellar-sdk";
 import { StellarClient } from "@lumen/core";
+import type { Signer } from "@lumen/types";
 import { CosignerService } from "./cosigner/service.js";
 import { FeeSponsorService } from "./fee-sponsor/service.js";
 import { PolicyEngine } from "./policy/engine.js";
@@ -18,8 +19,16 @@ export interface ServerOpts {
   network?: "testnet" | "mainnet" | "local";
   horizonUrl?: string;
   rpcUrl?: string;
-  cosignerSecret: string;
-  feePayerSecret: string;
+  /**
+   * Signer used by the co-signer service.
+   * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
+   */
+  cosignerSigner: Signer;
+  /**
+   * Signer used by the fee-sponsor service.
+   * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
+   */
+  feePayerSigner: Signer;
 }
 
 export function createServer(opts: ServerOpts): ServerResult {
@@ -31,18 +40,17 @@ export function createServer(opts: ServerOpts): ServerResult {
     rpcUrl: opts.rpcUrl,
   });
 
-  const cosignerKeypair = Keypair.fromSecret(opts.cosignerSecret);
-  const feePayerKeypair = Keypair.fromSecret(opts.feePayerSecret);
-
   const policyEngine = new PolicyEngine();
+
   const cosignerService = new CosignerService({
     client,
-    serverKeypair: cosignerKeypair,
+    signer: opts.cosignerSigner,
     policyEngine,
   });
+
   const feeSponsorService = new FeeSponsorService({
     client,
-    feePayerKeypair,
+    signer: opts.feePayerSigner,
   });
 
   const app = express();
@@ -134,11 +142,15 @@ export function createServer(opts: ServerOpts): ServerResult {
     try {
       const { Wallet } = await import("@lumen/core");
 
-      const sponsorKeypair = Keypair.fromSecret(opts.feePayerSecret);
+      // The sponsor keypair is only used here to derive the public key for the
+      // wallet creation flow; the actual signing goes through FeeSponsorService.
+      const sponsorKeypair = Keypair.fromPublicKey(
+        opts.feePayerSigner.publicKey()
+      );
       const wallet = new Wallet({
         client,
         sponsorKeypair,
-        serverPublicKey: cosignerKeypair.publicKey(),
+        serverPublicKey: opts.cosignerSigner.publicKey(),
       });
 
       const result = await wallet.create();
@@ -151,8 +163,8 @@ export function createServer(opts: ServerOpts): ServerResult {
   app.listen(port, () => {
     console.log(`Lumen server listening on port ${port}`);
     console.log(`Network: ${client.config.network}`);
-    console.log(`Cosigner: ${cosignerKeypair.publicKey()}`);
-    console.log(`Fee payer: ${feePayerKeypair.publicKey()}`);
+    console.log(`Cosigner: ${opts.cosignerSigner.publicKey()}`);
+    console.log(`Fee payer: ${opts.feePayerSigner.publicKey()}`);
   });
 
   return { app, client, cosignerService, feeSponsorService, policyEngine };
