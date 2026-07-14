@@ -1,0 +1,14 @@
+services:
+  stellar:
+    image: stellar/quickstart:testing
+    command: ["--local", "--enable-stellar-rpc"]
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+      - "6000:6000"
+    volumes:
+      - stellar-data:/data
+    platform: linux/amd64
+
+volumes:
+  stellar-data:
