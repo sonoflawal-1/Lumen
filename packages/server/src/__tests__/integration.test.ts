@@ -5,6 +5,7 @@ import { CosignerService } from "../cosigner/service.js";
 import { FeeSponsorService } from "../fee-sponsor/service.js";
 import { PolicyEngine } from "../policy/engine.js";
 import { createSpendLimitPolicy, createAllowlistPolicy } from "../policy/rules.js";
+import { EnvSigner } from "../signers/EnvSigner.js";
 
 const HORIZON_URL = process.env.HORIZON_URL ?? "http://localhost:8000";
 const RPC_URL = process.env.RPC_URL ?? "http://localhost:8000";
@@ -21,6 +22,7 @@ describe("CosignerService", () => {
   const client = getClient();
   const policyEngine = new PolicyEngine();
   const serverKeypair = Keypair.random();
+  const serverSigner = new EnvSigner(serverKeypair.secret());
 
   it("co-signs a valid transaction", async () => {
     const sponsor = Keypair.random();
@@ -42,7 +44,7 @@ describe("CosignerService", () => {
 
     const cosigner = new CosignerService({
       client,
-      serverKeypair,
+      signer: serverSigner,
       policyEngine,
     });
 
@@ -82,7 +84,7 @@ describe("CosignerService", () => {
 
     const cosigner = new CosignerService({
       client,
-      serverKeypair,
+      signer: serverSigner,
       policyEngine,
     });
 
@@ -140,7 +142,7 @@ describe("FeeSponsorService", () => {
 
     const feeSponsor = new FeeSponsorService({
       client,
-      feePayerKeypair: feePayer,
+      signer: new EnvSigner(feePayer.secret()),
     });
 
     const account = await client.horizon.loadAccount(source.publicKey());
@@ -184,7 +186,7 @@ describe("FeeSponsorService", () => {
 
     const feeSponsor = new FeeSponsorService({
       client,
-      feePayerKeypair: feePayer,
+      signer: new EnvSigner(feePayer.secret()),
     });
 
     const account = await client.horizon.loadAccount(source.publicKey());
