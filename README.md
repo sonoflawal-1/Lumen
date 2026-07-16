@@ -42,7 +42,7 @@ cd packages/server && pnpm test
 ### @lumen/server
 - `CosignerService` — co-signs transactions after policy check
 - `FeeSponsorService` — fee-bump wrapper service
-- `PolicyEngine` — configurable rules (spend limits, velocity, allowlists)
+- `PolicyEngine` — configurable rules (spend limits, velocity, allowlists) — see [Policy Configuration Guide](docs/policy-configuration.md) for specs and payload examples
 - Express API: `/cosign`, `/fee-bump`, `/wallet/create`, `/policy`
 
 ### @lumen/web-sdk
