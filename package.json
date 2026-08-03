@@ -7,10 +7,18 @@
     "build": "turbo build",
     "dev": "turbo dev",
     "test": "turbo test",
-    "lint": "turbo lint",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "typecheck": "turbo typecheck"
   },
   "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/parser": "^8.65.0",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
     "turbo": "^2.4.0",
     "typescript": "^5.8.0"
   }
