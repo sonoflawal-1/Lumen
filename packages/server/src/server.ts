@@ -1,10 +1,15 @@
-import express, { type Express } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { Keypair } from "@stellar/stellar-sdk";
 import { StellarClient } from "@lumen/core";
 import type { Signer } from "@lumen/types";
 import { CosignerService } from "./cosigner/service.js";
 import { FeeSponsorService } from "./fee-sponsor/service.js";
 import { PolicyEngine } from "./policy/engine.js";
+import {
+  CosignRequestSchema,
+  FeeBumpRequestSchema,
+  PolicyRequestSchema,
+} from "./validation.js";
 
 export interface ServerResult {
   app: Express;
@@ -60,15 +65,18 @@ export function createServer(opts: ServerOpts): ServerResult {
     res.json({ status: "ok", network: client.config.network });
   });
 
-  app.post("/cosign", async (req, res) => {
+  app.post("/cosign", async (req: Request, res: Response) => {
     try {
-      const { xdr, walletAddress } = req.body;
-      if (!xdr || !walletAddress) {
-        res.status(400).json({ error: "Missing xdr or walletAddress" });
+      const parsed = CosignRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Validation failed",
+          details: parsed.error.flatten().fieldErrors,
+        });
         return;
       }
 
-      const result = await cosignerService.cosign({ xdr, walletAddress });
+      const result = await cosignerService.cosign(parsed.data);
 
       if (!result.approved) {
         res.status(403).json({ error: result.reason });
@@ -81,37 +89,43 @@ export function createServer(opts: ServerOpts): ServerResult {
     }
   });
 
-  app.post("/fee-bump", async (req, res) => {
+  app.post("/fee-bump", async (req: Request, res: Response) => {
     try {
-      const { xdr } = req.body;
-      if (!xdr) {
-        res.status(400).json({ error: "Missing xdr" });
+      const parsed = FeeBumpRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Validation failed",
+          details: parsed.error.flatten().fieldErrors,
+        });
         return;
       }
 
-      const feeBumpXdr = await feeSponsorService.wrapFeeBump(xdr);
+      const feeBumpXdr = await feeSponsorService.wrapFeeBump(parsed.data.xdr);
       res.json({ feeBumpXdr });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post("/fee-bump/submit", async (req, res) => {
+  app.post("/fee-bump/submit", async (req: Request, res: Response) => {
     try {
-      const { xdr } = req.body;
-      if (!xdr) {
-        res.status(400).json({ error: "Missing xdr" });
+      const parsed = FeeBumpRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Validation failed",
+          details: parsed.error.flatten().fieldErrors,
+        });
         return;
       }
 
-      const result = await feeSponsorService.submit(xdr);
+      const result = await feeSponsorService.submit(parsed.data.xdr);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get("/policy/:walletId", (req, res) => {
+  app.get("/policy/:walletId", (req: Request, res: Response) => {
     const policy = policyEngine.getPolicy(req.params.walletId);
     if (!policy) {
       res.status(404).json({ error: "No policy found" });
@@ -120,17 +134,20 @@ export function createServer(opts: ServerOpts): ServerResult {
     res.json(policy);
   });
 
-  app.post("/policy", (req, res) => {
-    const { walletId, rules } = req.body;
-    if (!walletId || !rules) {
-      res.status(400).json({ error: "Missing walletId or rules" });
+  app.post("/policy", (req: Request, res: Response) => {
+    const parsed = PolicyRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "Validation failed",
+        details: parsed.error.flatten().fieldErrors,
+      });
       return;
     }
 
     const policy = {
       id: crypto.randomUUID(),
-      walletId,
-      rules,
+      walletId: parsed.data.walletId,
+      rules: parsed.data.rules,
       createdAt: new Date(),
     };
 
@@ -138,12 +155,10 @@ export function createServer(opts: ServerOpts): ServerResult {
     res.json(policy);
   });
 
-  app.post("/wallet/create", async (req, res) => {
+  app.post("/wallet/create", async (_req: Request, res: Response) => {
     try {
       const { Wallet } = await import("@lumen/core");
 
-      // The sponsor keypair is only used here to derive the public key for the
-      // wallet creation flow; the actual signing goes through FeeSponsorService.
       const sponsorKeypair = Keypair.fromPublicKey(
         opts.feePayerSigner.publicKey()
       );
@@ -158,6 +173,11 @@ export function createServer(opts: ServerOpts): ServerResult {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    console.error("Unhandled error:", err);
+    res.status(500).json({ error: "Internal server error" });
   });
 
   app.listen(port, () => {
