@@ -1,58 +1,75 @@
 # Lumen
 
-A Stellar wallet SDK for building non-custodial wallets with:
-- **Seedless onboarding** — Users don't manage secret keys
-- **Gasless transactions** — Server pays all fees via fee-bumps
-- **Policy controls** — Configurable spend limits, velocity, and allowlists
-- **2-of-2 multisig** — Server co-signs transactions after policy checks
+Seedless, gasless Stellar wallets — the user never holds a key or pays a fee.
 
-## Architecture
+License: MIT · Network: Stellar · Runtime: TypeScript + Node
 
+Seedless onboarding · gasless UX · 2-of-2 multisig · policy-controlled wallets · fee-bump sponsorship
+
+Lumen is a wallet SDK for building non-custodial Stellar wallets where the user never manages secret keys and never pays transaction fees. The server sponsors all accounts and fees, co-signs every transaction after a policy check, and enforces configurable rules (spend limits, velocity, allowlists) — all without holding user funds.
+
+See it in action
+
+```ts
+import { LumenClient } from "@lumen/web-sdk";
+
+const client = new LumenClient({
+  network: "testnet",
+  sponsorSecret: process.env.FEE_PAYER_SECRET!,
+  serverPublicKey: process.env.COSIGNER_PUBLIC_KEY!,
+});
+
+// Create a wallet — sponsor pays the XLM reserve
+const { address, id } = await client.createWallet();
+
+// Send a payment — fee-bumped, user never needs XLM for gas
+const { hash } = await client.sendPayment(id, "GDEST...PUBKEY", "XLM", "10");
 ```
-@lumen/web-sdk     → Browser SDK entry point
-@lumen/core        → Stellar primitives (accounts, multisig, fees, swaps)
-@lumen/server      → Co-signer, fee-sponsor, policy engine
-@lumen/types       → Shared TypeScript interfaces
-```
 
-## Quick Start
+How it works
+
+A user creates a wallet → the server sponsors the account and sets up 2-of-2 multisig → the user signs with their device key → the server co-signs after a policy check → the transaction is fee-bumped so the user never holds XLM.
+
+Layer | Backed by | What it is
+-- | -- | --
+Identity | Stellar | 2-of-2 multisig account with co-signer
+Fees | Stellar (fee-bumps) | Server wraps all txs; user pays zero gas
+Policy | @lumen/server | Spend limits, velocity, allowlists enforced before co-signing
+Key management | @lumen/core | Keypair generation, storage, derivation (OAuth, passphrase)
+SDK | @lumen/web-sdk | Browser client: createWallet, getBalance, sendPayment
+API | Express | /cosign, /fee-bump, /wallet/create, /policy
+
+Why it's different
+
+Most wallet SDKs require users to manage seed phrases and hold tokens for gas. Lumen makes both invisible.
+
+|  | Traditional wallet | Lumen
+-- | -- | --
+Onboarding | User must back up seed phrase | Seedless — server manages keys
+Gas | User holds XLM for fees | Gasless — server fee-bumps all txs
+Security | Single key controls funds | 2-of-2 multisig — server co-signs
+Policy | None or off-chain | On-chain spend limits, velocity, allowlists
+Control | Who holds the seed | Who holds the co-signer key
+
+Quickstart
+
+Prereqs: Node.js 18+, pnpm, Docker (for local Stellar network).
 
 ```bash
 # Install
 pnpm install
 
-# Local Stellar network
+# Start local Stellar network
 docker run --rm -p 8000:8000 stellar/quickstart:testing --local --enable-stellar-rpc
 
 # Build all packages
 pnpm build
 
 # Run tests
-cd packages/core && pnpm test
-cd packages/server && pnpm test
+pnpm test
 ```
 
-## Packages
-
-### @lumen/core
-- `StellarClient` — Horizon + Soroban RPC wrapper
-- `createSponsoredAccount()` — sponsor pays reserves for new accounts
-- `setupMultisig()` — add co-signer, set 2-of-2 threshold
-- `buildFeeBump()` — wrap transactions so users never hold XLM for gas
-- `pathPayment()` — same-ledger asset conversion via Stellar DEX
-- `KeyManager` — generate, store, load keypairs
-- `Wallet` — full wallet abstraction (create, balance, send)
-
-### @lumen/server
-- `CosignerService` — co-signs transactions after policy check
-- `FeeSponsorService` — fee-bump wrapper service
-- `PolicyEngine` — configurable rules (spend limits, velocity, allowlists) — see [Policy Configuration Guide](docs/policy-configuration.md) for specs and payload examples
-- Express API: `/cosign`, `/fee-bump`, `/wallet/create`, `/policy`
-
-### @lumen/web-sdk
-- `LumenClient` — `createWallet()`, `getBalance()`, `sendPayment()`
-
-## Environment
+Environment
 
 Copy `.env.example` to `.env` and fill in:
 
@@ -62,47 +79,13 @@ FEE_PAYER_SECRET=S...       # Fee sponsor key
 STELLAR_NETWORK=testnet
 ```
 
-## How It Works
+Packages
 
-1. **User creates wallet** → server sponsors account + reserves, sets up 2-of-2 multisig
-2. **User sends payment** → builds tx, signs with device key, server co-signs after policy check
-3. **Gasless** → server wraps all txs in fee-bumps, user never holds XLM
-4. **Policy engine** → spend limits, velocity checks, allowlists enforced before co-signing
+- **@lumen/core** — StellarClient, createSponsoredAccount, setupMultisig, buildFeeBump, pathPayment, KeyManager, Wallet
+- **@lumen/server** — CosignerService, FeeSponsorService, PolicyEngine, Express API
+- **@lumen/web-sdk** — LumenClient: createWallet, getBalance, sendPayment
+- **@lumen/types** — Shared TypeScript interfaces
 
-## Usage
-
-The snippet below shows the end-to-end flow using `@lumen/web-sdk`. Run the server first (`cd packages/server && pnpm dev`) so the co-signer and fee-sponsor endpoints are available.
-
-```ts
-import { LumenClient } from "@lumen/web-sdk";
-
-// Initialise — sponsorSecret and serverPublicKey come from your server environment
-const client = new LumenClient({
-  network: "testnet",
-  sponsorSecret: process.env.FEE_PAYER_SECRET!,
-  serverPublicKey: process.env.COSIGNER_PUBLIC_KEY!,
-});
-
-// Create a gasless, seedless wallet (sponsor pays the XLM reserve)
-const { address, id } = await client.createWallet();
-console.log("Wallet address:", address);
-
-// Check balance
-const balance = await client.getBalance(id);
-console.log("Balance:", balance, "XLM");
-
-// Send a payment (fee-bumped — user never needs XLM for gas)
-const { hash } = await client.sendPayment(
-  id,
-  "GDEST...PUBKEY", // destination Stellar address
-  "XLM",
-  "10"
-);
-console.log("Payment submitted:", hash);
-```
-
-See [`packages/web-sdk/README.md`](./packages/web-sdk/README.md) for the full API reference.
-
-## License
+License
 
 MIT
