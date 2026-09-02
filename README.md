@@ -1,6 +1,10 @@
 # Lumen
 
-Stellar-native wallet SDK replicating Okto's core value prop: seedless onboarding, gasless UX, chain-abstracted intents, and policy-controlled wallets.
+A Stellar wallet SDK for building non-custodial wallets with:
+- **Seedless onboarding** — Users don't manage secret keys
+- **Gasless transactions** — Server pays all fees via fee-bumps
+- **Policy controls** — Configurable spend limits, velocity, and allowlists
+- **2-of-2 multisig** — Server co-signs transactions after policy checks
 
 ## Architecture
 
