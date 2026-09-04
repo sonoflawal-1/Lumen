@@ -34,23 +34,88 @@ export class KeyManager {
     return Keypair.fromRawEd25519Seed(seed);
   }
 
-  store(key: Keypair, passphrase: string): StoredKey {
+  async store(key: Keypair, passphrase: string): Promise<StoredKey> {
+    const encoder = new TextEncoder();
     const secret = key.secret();
-    const encrypted = btoa(secret);
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(passphrase),
+      { name: "PBKDF2" },
+      false,
+      ["deriveKey"]
+    );
+
+    const aesKey = await crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt,
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt"]
+    );
+
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encrypted = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: iv as BufferSource },
+      aesKey,
+      encoder.encode(secret)
+    );
+
+    const encryptedSecret = `${Buffer.from(salt).toString("base64")}.${Buffer.from(iv).toString("base64")}.${Buffer.from(encrypted).toString("base64")}`;
+
     const stored: StoredKey = {
       publicKey: key.publicKey(),
-      encryptedSecret: encrypted,
+      encryptedSecret,
       createdAt: new Date(),
     };
     this.keys.set(key.publicKey(), stored);
     return stored;
   }
 
-  load(publicKey: string, passphrase: string): Keypair {
+  async load(publicKey: string, passphrase: string): Promise<Keypair> {
     const stored = this.keys.get(publicKey);
     if (!stored) throw new Error(`Key not found: ${publicKey}`);
 
-    const secret = atob(stored.encryptedSecret);
+    const [saltB64, ivB64, cipherB64] = stored.encryptedSecret.split(".");
+    const salt = Buffer.from(saltB64, "base64");
+    const iv = Buffer.from(ivB64, "base64");
+    const ciphertext = Buffer.from(cipherB64, "base64");
+
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(passphrase),
+      { name: "PBKDF2" },
+      false,
+      ["deriveKey"]
+    );
+
+    const aesKey = await crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt: salt as BufferSource,
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["decrypt"]
+    );
+
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: iv as BufferSource },
+      aesKey,
+      ciphertext as BufferSource
+    );
+
+    const secret = new TextDecoder().decode(decrypted);
     return Keypair.fromSecret(secret);
   }
 

@@ -19,9 +19,9 @@ describe("KeyManager", () => {
   });
 
   describe("store", () => {
-    it("stores a key and returns StoredKey", () => {
+    it("stores a key and returns StoredKey", async () => {
       const kp = keyManager.generateKeypair();
-      const stored = keyManager.store(kp, "test-passphrase");
+      const stored = await keyManager.store(kp, "test-passphrase");
 
       expect(stored).toHaveProperty("publicKey");
       expect(stored).toHaveProperty("encryptedSecret");
@@ -30,28 +30,24 @@ describe("KeyManager", () => {
       expect(typeof stored.encryptedSecret).toBe("string");
       expect(stored.encryptedSecret).not.toBe("");
 
-      // Verify the key can be retrieved
-      const loaded = keyManager.load(stored.publicKey, "test-passphrase");
+      const loaded = await keyManager.load(stored.publicKey, "test-passphrase");
       expect(loaded.publicKey()).toBe(kp.publicKey());
     });
 
-    it("loads a previously stored key without passphrase validation", () => {
+    it("rejects load with wrong passphrase", async () => {
       const kp = keyManager.generateKeypair();
-      const stored = keyManager.store(kp, "any-passphrase");
+      const stored = await keyManager.store(kp, "correct-passphrase");
 
-      // The load method accepts a passphrase parameter but doesn't validate it
-      // (keys are stored with base64 encoding per the current implementation)
-      const loaded = keyManager.load(stored.publicKey, "wrong-passphrase");
-      expect(loaded.publicKey()).toBe(kp.publicKey());
+      await expect(keyManager.load(stored.publicKey, "wrong-passphrase")).rejects.toThrow();
     });
   });
 
   describe("load", () => {
-    it("loads a previously stored key", () => {
+    it("loads a previously stored key", async () => {
       const kp = keyManager.generateKeypair();
-      const stored = keyManager.store(kp, "test-passphrase");
+      const stored = await keyManager.store(kp, "test-passphrase");
 
-      const loaded = keyManager.load(stored.publicKey, "test-passphrase");
+      const loaded = await keyManager.load(stored.publicKey, "test-passphrase");
       expect(loaded.publicKey()).toBe(kp.publicKey());
     });
   });
