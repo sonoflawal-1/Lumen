@@ -4,6 +4,7 @@ import express, {
   type Response,
   type NextFunction,
 } from "express";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { Keypair } from "@stellar/stellar-sdk";
 import { StellarClient } from "@lumen/core";
 import type { Signer } from "@lumen/types";
@@ -18,13 +19,13 @@ import {
 import {
   ValidationError,
   PolicyError,
-  StellarError,
   errorHandler,
   wrapHandler,
 } from "./errors.js";
 
 export interface ServerResult {
   app: Express;
+  server: HttpServer;
   client: StellarClient;
   cosignerService: CosignerService;
   feeSponsorService: FeeSponsorService;
@@ -73,6 +74,16 @@ export function createServer(opts: ServerOpts): ServerResult {
   const app = express();
   app.use(express.json());
 
+  let activeRequests = 0;
+
+  app.use((_req: Request, _res: Response, next: NextFunction) => {
+    activeRequests++;
+    _res.on("finish", () => {
+      activeRequests--;
+    });
+    next();
+  });
+
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", network: client.config.network });
   });
@@ -113,7 +124,7 @@ export function createServer(opts: ServerOpts): ServerResult {
   }));
 
   app.get("/policy/:walletId", (req: Request, res: Response) => {
-    const policy = policyEngine.getPolicy(req.params.walletId);
+    const policy = policyEngine.getPolicy(req.params.walletId as string);
     if (!policy) {
       throw new PolicyError("No policy found", 404);
     }
@@ -155,12 +166,42 @@ export function createServer(opts: ServerOpts): ServerResult {
 
   app.use(errorHandler);
 
-  app.listen(port, () => {
+  const server = createHttpServer(app);
+
+  server.listen(port, () => {
     console.log(`Lumen server listening on port ${port}`);
     console.log(`Network: ${client.config.network}`);
     console.log(`Cosigner: ${opts.cosignerSigner.publicKey()}`);
     console.log(`Fee payer: ${opts.feePayerSigner.publicKey()}`);
   });
 
-  return { app, client, cosignerService, feeSponsorService, policyEngine };
+  const gracefulShutdown = (signal: string) => {
+    console.log(`${signal} received, shutting down gracefully`);
+
+    server.close(() => {
+      console.log("HTTP server closed");
+      process.exit(0);
+    });
+
+    const timeout = setTimeout(() => {
+      console.error("Forced shutdown after timeout");
+      process.exit(1);
+    }, 30000);
+
+    const checkInterval = setInterval(() => {
+      if (activeRequests === 0) {
+        clearInterval(checkInterval);
+        clearTimeout(timeout);
+        server.close(() => {
+          console.log("HTTP server closed");
+          process.exit(0);
+        });
+      }
+    }, 100);
+  };
+
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+  return { app, server, client, cosignerService, feeSponsorService, policyEngine };
 }
