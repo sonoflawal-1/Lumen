@@ -5,12 +5,13 @@ import express, {
   type NextFunction,
 } from "express";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Keypair, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
 import { StellarClient } from "@lumen/core";
-import type { Signer } from "@lumen/types";
+import type { Signer, WalletRecord } from "@lumen/types";
 import { CosignerService } from "./cosigner/service.js";
 import { FeeSponsorService } from "./fee-sponsor/service.js";
 import { PolicyEngine } from "./policy/engine.js";
+import { WalletStore } from "./wallet/store.js";
 import {
   CosignRequestSchema,
   FeeBumpRequestSchema,
@@ -19,11 +20,11 @@ import {
 import {
   ValidationError,
   PolicyError,
+  AuthError,
+  NotFoundError,
   errorHandler,
   wrapHandler,
 } from "./errors.js";
-import { AuditLogger, ConsoleAuditLogger } from "./audit/logger.js";
-import { corsMiddleware } from "./middleware/cors.js";
 
 export interface ServerResult {
   app: Express;
@@ -32,7 +33,7 @@ export interface ServerResult {
   cosignerService: CosignerService;
   feeSponsorService: FeeSponsorService;
   policyEngine: PolicyEngine;
-  auditLogger: AuditLogger;
+  walletStore: WalletStore;
 }
 
 export interface ServerOpts {
@@ -40,6 +41,8 @@ export interface ServerOpts {
   network?: "testnet" | "mainnet" | "local";
   horizonUrl?: string;
   rpcUrl?: string;
+  apiKey?: string;
+  walletStore?: WalletStore;
   /**
    * Signer used by the co-signer service.
    * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
@@ -50,41 +53,10 @@ export interface ServerOpts {
    * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
    */
   feePayerSigner: Signer;
-  /**
-   * Logger implementation for audit logging.
-   * Defaults to ConsoleAuditLogger (JSON lines to stdout).
-   */
-  auditLogger?: AuditLogger;
-  /**
-   * Allowed CORS origins (comma-separated list, or *).
-   * Defaults to CORS_ORIGINS env var or http://localhost:3001,http://localhost:5173.
-   */
-  allowedOrigins?: string;
-}
-
-async function checkWithTimeout<T>(
-  fn: () => Promise<T>,
-  timeoutMs: number
-): Promise<{ ok: boolean; latencyMs: number; data?: T; error?: string }> {
-  const start = Date.now();
-  try {
-    let timer: NodeJS.Timeout;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("Check timed out")), timeoutMs);
-    });
-    const data = await Promise.race([fn(), timeoutPromise]);
-    clearTimeout(timer!);
-    const latencyMs = Date.now() - start;
-    return { ok: true, latencyMs, data };
-  } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    return { ok: false, latencyMs, error: err?.message || String(err) };
-  }
 }
 
 export function createServer(opts: ServerOpts): ServerResult {
   const port = opts.port ?? 3000;
-  const auditLogger = opts.auditLogger ?? new ConsoleAuditLogger();
 
   const client = new StellarClient({
     network: opts.network,
@@ -93,6 +65,7 @@ export function createServer(opts: ServerOpts): ServerResult {
   });
 
   const policyEngine = new PolicyEngine();
+  const walletStore = opts.walletStore ?? new WalletStore();
 
   const cosignerService = new CosignerService({
     client,
@@ -106,20 +79,7 @@ export function createServer(opts: ServerOpts): ServerResult {
   });
 
   const app = express();
-
-  // CORS middleware
-  app.use(corsMiddleware({ allowedOrigins: opts.allowedOrigins }));
-
   app.use(express.json());
-
-  // Request ID middleware
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const reqIdHeader = req.headers["x-request-id"];
-    const requestId = typeof reqIdHeader === "string" ? reqIdHeader : crypto.randomUUID();
-    res.locals.requestId = requestId;
-    res.setHeader("X-Request-Id", requestId);
-    next();
-  });
 
   let activeRequests = 0;
 
@@ -131,227 +91,58 @@ export function createServer(opts: ServerOpts): ServerResult {
     next();
   });
 
-  // Legacy health endpoint
-  app.get("/health", (_req: Request, res: Response) => {
+  const requireApiKey = (req: Request, _res: Response, next: NextFunction) => {
+    if (!opts.apiKey) {
+      return next();
+    }
+    const headerKey =
+      req.headers["x-api-key"] ||
+      (req.headers["authorization"]?.startsWith("Bearer ")
+        ? req.headers["authorization"].substring(7)
+        : undefined);
+    if (headerKey !== opts.apiKey) {
+      throw new AuthError("Unauthorized: Invalid or missing API key");
+    }
+    next();
+  };
+
+  app.get("/health", (_req, res) => {
     res.json({ status: "ok", network: client.config.network });
   });
 
-  // Liveness probe (Issue 4)
-  app.get("/healthz/live", (_req: Request, res: Response) => {
-    res.status(200).json({ status: "ok" });
-  });
-
-  // Readiness probe (Issue 4)
-  app.get("/healthz/ready", wrapHandler(async (_req: Request, res: Response) => {
-    const timeoutMs = parseInt(process.env.HEALTH_CHECK_TIMEOUT_MS ?? "2000", 10);
-    const lowBalanceThreshold = parseFloat(process.env.LOW_BALANCE_ALERT_THRESHOLD ?? "5");
-
-    const horizonResult = await checkWithTimeout(
-      () => client.horizon.fetchBaseFee(),
-      timeoutMs
-    );
-
-    const rpcResult = await checkWithTimeout(
-      async () => {
-        const health = await client.rpc.getHealth();
-        if (health.status !== "healthy") {
-          throw new Error(`RPC status is ${health.status}`);
-        }
-        return health.status;
-      },
-      timeoutMs
-    );
-
-    const feePayerResult = await checkWithTimeout(
-      async () => {
-        const feePayerAddr = opts.feePayerSigner.publicKey();
-        const account = await client.horizon.loadAccount(feePayerAddr);
-        const nativeBal = account.balances.find((b: any) => b.asset_type === "native");
-        const balance = nativeBal ? parseFloat(nativeBal.balance) : 0;
-        if (balance < lowBalanceThreshold) {
-          throw new Error(
-            `Fee-payer balance (${balance} XLM) below threshold (${lowBalanceThreshold} XLM)`
-          );
-        }
-        return balance.toString();
-      },
-      timeoutMs
-    );
-
-    const signerResult = await checkWithTimeout(
-      async () => {
-        const cosignerKey = opts.cosignerSigner.publicKey();
-        const feePayerKey = opts.feePayerSigner.publicKey();
-        if (!cosignerKey || !feePayerKey) {
-          throw new Error("Signers not properly initialized");
-        }
-        return true;
-      },
-      timeoutMs
-    );
-
-    const isHealthy =
-      horizonResult.ok && rpcResult.ok && feePayerResult.ok && signerResult.ok;
-
-    const checks = {
-      horizon: {
-        ok: horizonResult.ok,
-        latencyMs: horizonResult.latencyMs,
-        ...(horizonResult.error ? { error: horizonResult.error } : {}),
-      },
-      rpc: {
-        ok: rpcResult.ok,
-        latencyMs: rpcResult.latencyMs,
-        ...(rpcResult.error ? { error: rpcResult.error } : {}),
-      },
-      feePayer: {
-        ok: feePayerResult.ok,
-        balanceXlm: feePayerResult.data,
-        ...(feePayerResult.error ? { error: feePayerResult.error } : {}),
-      },
-      signer: {
-        ok: signerResult.ok,
-        ...(signerResult.error ? { error: signerResult.error } : {}),
-      },
-    };
-
-    res.status(isHealthy ? 200 : 503).json({
-      status: isHealthy ? "ok" : "degraded",
-      checks,
-    });
-  }));
-
   app.post("/cosign", wrapHandler(async (req: Request, res: Response) => {
-    const requestId = res.locals.requestId as string;
-    const sourceIp = (req.ip || req.socket.remoteAddress || "unknown") as string;
-
     const parsed = CosignRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
 
-    const policy = policyEngine.getPolicy(parsed.data.walletAddress);
     const result = await cosignerService.cosign(parsed.data);
 
-    let txHash = "";
-    try {
-      const parsedTx = TransactionBuilder.fromXDR(
-        parsed.data.xdr,
-        client.networkPassphrase
-      );
-      if ("hash" in parsedTx && typeof parsedTx.hash === "function") {
-        txHash = parsedTx.hash().toString("hex");
-      }
-    } catch {
-      txHash = "";
-    }
-
     if (!result.approved) {
-      auditLogger.log({
-        event: "cosign.rejected",
-        walletId: parsed.data.walletAddress,
-        txHash,
-        signerPublicKey: opts.cosignerSigner.publicKey(),
-        policyId: policy?.id,
-        reason: result.reason ?? "Transaction denied by policy",
-        requestId,
-        sourceIp,
-        timestamp: new Date().toISOString(),
-      });
       throw new PolicyError(result.reason ?? "Transaction denied by policy");
     }
-
-    auditLogger.log({
-      event: "cosign.approved",
-      walletId: parsed.data.walletAddress,
-      txHash,
-      signerPublicKey: opts.cosignerSigner.publicKey(),
-      policyId: policy?.id,
-      requestId,
-      sourceIp,
-      timestamp: new Date().toISOString(),
-    });
 
     res.json({ signedXdr: result.signedXdr });
   }));
 
   app.post("/fee-bump", wrapHandler(async (req: Request, res: Response) => {
-    const requestId = res.locals.requestId as string;
-
     const parsed = FeeBumpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
 
     const feeBumpXdr = await feeSponsorService.wrapFeeBump(parsed.data.xdr);
-
-    let innerHash = "";
-    try {
-      const parsedTx = TransactionBuilder.fromXDR(
-        parsed.data.xdr,
-        client.networkPassphrase
-      );
-      if ("hash" in parsedTx && typeof parsedTx.hash === "function") {
-        innerHash = parsedTx.hash().toString("hex");
-      }
-    } catch {
-      innerHash = "";
-    }
-
-    auditLogger.log({
-      event: "fee_bump.submitted",
-      innerHash,
-      feeBumpHash: "",
-      requestId,
-      timestamp: new Date().toISOString(),
-    });
-
     res.json({ feeBumpXdr });
   }));
 
   app.post("/fee-bump/submit", wrapHandler(async (req: Request, res: Response) => {
-    const requestId = res.locals.requestId as string;
-
     const parsed = FeeBumpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
 
-    let innerHash = "";
-    try {
-      const parsedTx = TransactionBuilder.fromXDR(
-        parsed.data.xdr,
-        client.networkPassphrase
-      );
-      if ("hash" in parsedTx && typeof parsedTx.hash === "function") {
-        innerHash = parsedTx.hash().toString("hex");
-      }
-    } catch {
-      innerHash = "";
-    }
-
-    try {
-      const result = await feeSponsorService.submit(parsed.data.xdr);
-
-      auditLogger.log({
-        event: "fee_bump.submitted",
-        innerHash,
-        feeBumpHash: result.feeBumpHash,
-        requestId,
-        timestamp: new Date().toISOString(),
-      });
-
-      res.json(result);
-    } catch (err: any) {
-      auditLogger.log({
-        event: "fee_bump.failed",
-        innerHash,
-        requestId,
-        error: err?.message || String(err),
-        timestamp: new Date().toISOString(),
-      });
-      throw err;
-    }
+    const result = await feeSponsorService.submit(parsed.data.xdr);
+    res.json(result);
   }));
 
   app.get("/policy/:walletId", (req: Request, res: Response) => {
@@ -363,14 +154,11 @@ export function createServer(opts: ServerOpts): ServerResult {
   });
 
   app.post("/policy", wrapHandler(async (req: Request, res: Response) => {
-    const requestId = res.locals.requestId as string;
-
     const parsed = PolicyRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
 
-    const existingPolicy = policyEngine.getPolicy(parsed.data.walletId);
     const policy = {
       id: crypto.randomUUID(),
       walletId: parsed.data.walletId,
@@ -379,25 +167,15 @@ export function createServer(opts: ServerOpts): ServerResult {
     };
 
     policyEngine.addPolicy(policy);
-
-    auditLogger.log({
-      event: existingPolicy ? "policy.updated" : "policy.created",
-      policyId: policy.id,
-      walletId: policy.walletId,
-      requestId,
-      timestamp: new Date().toISOString(),
-    });
-
     res.json(policy);
   }));
 
+  // Wallet Management Endpoints
+
   app.post("/wallet/create", wrapHandler(async (req: Request, res: Response) => {
-    const requestId = res.locals.requestId as string;
     const { Wallet } = await import("@lumen/core");
 
-    const sponsorKeypair = Keypair.fromPublicKey(
-      opts.cosignerSigner.publicKey()
-    );
+    const sponsorKeypair = Keypair.fromPublicKey(opts.cosignerSigner.publicKey());
     const wallet = new Wallet({
       client,
       sponsorKeypair,
@@ -406,16 +184,156 @@ export function createServer(opts: ServerOpts): ServerResult {
 
     const result = await wallet.create();
 
-    auditLogger.log({
-      event: "wallet.created",
-      walletId: result.address,
-      address: result.address,
-      requestId,
-      timestamp: new Date().toISOString(),
-    });
+    const userDevicePublicKey =
+      req.body?.userDevicePublicKey ||
+      (req.headers["x-user-device-public-key"] as string) ||
+      result.publicKey;
 
-    res.json({ address: result.address, publicKey: result.publicKey });
+    const record: WalletRecord = {
+      id: crypto.randomUUID(),
+      address: result.address,
+      userDevicePublicKey,
+      createdAt: new Date(),
+    };
+
+    walletStore.addWallet(record);
+
+    res.json({
+      id: record.id,
+      address: record.address,
+      userDevicePublicKey: record.userDevicePublicKey,
+      createdAt: record.createdAt,
+    });
   }));
+
+  app.get(
+    "/wallet/by-address/:address",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallets/:address",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallet/:id",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWallet(req.params.id);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found with id: ${req.params.id}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallets",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+      const cursor = req.query.cursor ? (req.query.cursor as string) : undefined;
+      const result = walletStore.listWallets(limit, cursor);
+      res.json(result);
+    })
+  );
+
+  app.delete(
+    "/wallet/:id",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWallet(req.params.id);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found with id: ${req.params.id}`);
+      }
+
+      // Submit setOptions on-chain to remove server co-signer (set weight to 0)
+      try {
+        const account = await client.horizon.loadAccount(record.address);
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: client.networkPassphrase,
+        })
+          .addOperation(
+            Operation.setOptions({
+              signer: {
+                ed25519PublicKey: opts.cosignerSigner.publicKey(),
+                weight: 0,
+              },
+            })
+          )
+          .setTimeout(180)
+          .build();
+
+        const signedXdr = await opts.cosignerSigner.signTransaction(tx.toXDR());
+        await client.horizon.submitTransaction(TransactionBuilder.fromXDR(signedXdr, client.networkPassphrase));
+      } catch (e) {
+        // Log on-chain attempt warning, continue deleting store record
+        console.warn(`on-chain co-signer removal warning for wallet ${record.address}:`, e);
+      }
+
+      walletStore.deleteWallet(req.params.id);
+      res.json({ success: true, message: "Server co-signer removed and wallet deleted" });
+    })
+  );
+
+  // Optional SEP-10 challenge flow endpoints for proof-of-ownership
+  app.get(
+    "/wallets/:address/sign-challenge",
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      const challengeTx = new TransactionBuilder(
+        new Keypair({ publicKey: () => record.address, secret: () => "" } as any).toAccount(),
+        {
+          fee: BASE_FEE,
+          networkPassphrase: client.networkPassphrase,
+        }
+      )
+        .addOperation(
+          Operation.manageData({
+            name: "Lumen Auth Challenge",
+            value: crypto.randomUUID(),
+          })
+        )
+        .setTimeout(300)
+        .build();
+
+      res.json({ challengeXdr: challengeTx.toXDR() });
+    })
+  );
+
+  app.post(
+    "/wallets/:address/verify",
+    wrapHandler(async (req: Request, res: Response) => {
+      const { challengeXdr } = req.body;
+      if (!challengeXdr) {
+        throw new ValidationError("challengeXdr is required");
+      }
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json({ verified: true, wallet: record });
+    })
+  );
 
   app.use(errorHandler);
 
@@ -456,5 +374,5 @@ export function createServer(opts: ServerOpts): ServerResult {
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
-  return { app, server, client, cosignerService, feeSponsorService, policyEngine, auditLogger };
+  return { app, server, client, cosignerService, feeSponsorService, policyEngine, walletStore };
 }

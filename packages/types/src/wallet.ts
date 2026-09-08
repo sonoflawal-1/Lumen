@@ -12,3 +12,11 @@ export interface WalletInstance {
   state: WalletState;
   createdAt: Date;
 }
+
+export interface WalletRecord {
+  id: string; // UUID
+  address: string; // Stellar G... public key
+  userDevicePublicKey: string; // G... of user device key
+  createdAt: Date;
+}
+

@@ -6,7 +6,11 @@
   "scripts": {
     "build": "turbo build",
     "dev": "turbo dev",
+    "dev:stellar": "docker compose -f docker/docker-compose.yml up -d",
+    "dev:stellar:down": "docker compose -f docker/docker-compose.yml down",
+    "dev:stellar:logs": "docker compose -f docker/docker-compose.yml logs -f",
     "test": "turbo test",
+    "test:integration": "docker compose -f docker/docker-compose.yml up -d && pnpm test",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
