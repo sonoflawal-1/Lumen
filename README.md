@@ -1,91 +1,126 @@
 # Lumen
 
-Seedless, gasless Stellar wallets — the user never holds a key or pays a fee.
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Network](https://img.shields.io/badge/network-Stellar-orange.svg)](https://stellar.org)
+[![Runtime](https://img.shields.io/badge/runtime-TypeScript%20%2B%20Node-blue.svg)](https://nodejs.org)
 
-License: MIT · Network: Stellar · Runtime: TypeScript + Node
-
-Seedless onboarding · gasless UX · 2-of-2 multisig · policy-controlled wallets · fee-bump sponsorship
+> **Seedless, gasless Stellar wallets — the user never holds a key or pays a fee.**
 
 Lumen is a wallet SDK for building non-custodial Stellar wallets where the user never manages secret keys and never pays transaction fees. The server sponsors all accounts and fees, co-signs every transaction after a policy check, and enforces configurable rules (spend limits, velocity, allowlists) — all without holding user funds.
 
-See it in action
+---
 
-```ts
-import { LumenClient } from "@lumen/web-sdk";
+## Table of Contents
 
-const client = new LumenClient({
-  network: "testnet",
-  sponsorSecret: process.env.FEE_PAYER_SECRET!,
-  serverPublicKey: process.env.COSIGNER_PUBLIC_KEY!,
-});
+1. [Features](#features)
+2. [How It Works](#how-it-works)
+3. [Architecture](#architecture)
+4. [Why Lumen Is Different](#why-lumen-is-different)
+5. [Quickstart](#quickstart)
+6. [Packages](#packages)
+7. [Environment](#environment)
+8. [License](#license)
 
-// Create a wallet — sponsor pays the XLM reserve
-const { address, id } = await client.createWallet();
+---
 
-// Send a payment — fee-bumped, user never needs XLM for gas
-const { hash } = await client.sendPayment(id, "GDEST...PUBKEY", "XLM", "10");
+## Features
+
+| Feature | Description |
+| --- | --- |
+| **Seedless onboarding** | Users create a wallet in seconds — no seed phrase, no key management. |
+| **Gasless UX** | The server fee-bumps every transaction so users never hold XLM for fees. |
+| **2-of-2 multisig** | Every wallet is a 2-of-2 account: the user signs with their device key, the server co-signs after policy. |
+| **Policy-controlled** | Spend limits, velocity rules, and destination allowlists enforced on-chain before co-signing. |
+| **Sponsorship** | The server pays XLM reserves for account creation and transaction fees. |
+| **Hardware-backed signing** | `Signer` abstraction supports AWS KMS, CloudHSM, and HashiCorp Vault for production. |
+
+---
+
+## How It Works
+
+```
+User creates a wallet
+  → Server sponsors the account (pays XLM reserve)
+  → Server sets up 2-of-2 multisig
+  → User signs with their device key
+  → Server co-signs after a policy check
+  → Transaction is fee-bumped so the user never holds XLM
 ```
 
-How it works
+| Layer | Backed by | What it is |
+| --- | --- | --- |
+| Identity | Stellar | 2-of-2 multisig account with co-signer |
+| Fees | Stellar (fee-bumps) | Server wraps all txs; user pays zero gas |
+| Policy | `@lumen/server` | Spend limits, velocity, allowlists enforced before co-signing |
+| Key management | `@lumen/core` | Keypair generation, storage, derivation (OAuth, passphrase) |
+| SDK | `@lumen/web-sdk` | Browser client: `createWallet`, `getBalance`, `sendPayment` |
+| API | Express | `/cosign`, `/fee-bump`, `/wallet/create`, `/policy` |
 
-A user creates a wallet → the server sponsors the account and sets up 2-of-2 multisig → the user signs with their device key → the server co-signs after a policy check → the transaction is fee-bumped so the user never holds XLM.
+---
 
-Layer | Backed by | What it is
--- | -- | --
-Identity | Stellar | 2-of-2 multisig account with co-signer
-Fees | Stellar (fee-bumps) | Server wraps all txs; user pays zero gas
-Policy | @lumen/server | Spend limits, velocity, allowlists enforced before co-signing
-Key management | @lumen/core | Keypair generation, storage, derivation (OAuth, passphrase)
-SDK | @lumen/web-sdk | Browser client: createWallet, getBalance, sendPayment
-API | Express | /cosign, /fee-bump, /wallet/create, /policy
-
-Why it's different
+## Why Lumen Is Different
 
 Most wallet SDKs require users to manage seed phrases and hold tokens for gas. Lumen makes both invisible.
 
-|  | Traditional wallet | Lumen
--- | -- | --
-Onboarding | User must back up seed phrase | Seedless — server manages keys
-Gas | User holds XLM for fees | Gasless — server fee-bumps all txs
-Security | Single key controls funds | 2-of-2 multisig — server co-signs
-Policy | None or off-chain | On-chain spend limits, velocity, allowlists
-Control | Who holds the seed | Who holds the co-signer key
+| | Traditional Wallet | Lumen |
+| --- | --- | --- |
+| Onboarding | User must back up seed phrase | Seedless — server manages keys |
+| Gas | User holds XLM for fees | Gasless — server fee-bumps all txs |
+| Security | Single key controls funds | 2-of-2 multisig — server co-signs |
+| Policy | None or off-chain | On-chain spend limits, velocity, allowlists |
+| Control | Who holds the seed | Who holds the co-signer key |
 
-Quickstart
+---
 
-Prereqs: Node.js 18+, pnpm, Docker (for local Stellar network).
+## Quickstart
+
+> **Prereqs:** Node.js 18+, pnpm, Docker (for the local Stellar network).
+
+### 1. Install dependencies
 
 ```bash
-# Install
 pnpm install
+```
 
-# Start local Stellar network
-docker run --rm -p 8000:8000 stellar/quickstart:testing --local --enable-stellar-rpc
+### 2. Start the local Stellar network
 
-# Build all packages
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
+### 3. Configure your environment
+
+```bash
+cp .env.example .env
+# Edit .env with your keys and network settings
+```
+
+### 4. Build and test
+
+```bash
 pnpm build
-
-# Run tests
 pnpm test
 ```
 
-Environment
+### 5. Start the server
 
-Copy `.env.example` to `.env` and fill in:
-
-```
-COSIGNER_SECRET=S...        # Server co-signer key
-FEE_PAYER_SECRET=S...       # Fee sponsor key
-STELLAR_NETWORK=testnet
+```bash
+pnpm --filter @lumen/server dev
 ```
 
-Packages
+---
 
-- **@lumen/core** — StellarClient, createSponsoredAccount, setupMultisig, buildFeeBump, pathPayment, KeyManager, Wallet
-- **@lumen/server** — CosignerService, FeeSponsorService, PolicyEngine, Express API
-- **@lumen/web-sdk** — LumenClient: createWallet, getBalance, sendPayment
-- **@lumen/types** — Shared TypeScript interfaces
+## Packages
 
-License
+| Package | Description |
+| --- | --- |
+| **`@lumen/core`** | `StellarClient`, `createSponsoredAccount`, `setupMultisig`, `buildFeeBump`, `pathPayment`, `KeyManager`, `Wallet` |
+| **`@lumen/server`** | `CosignerService`, `FeeSponsorService`, `PolicyEngine`, Express API |
+| **`@lumen/web-sdk`** | `LumenClient`: `createWallet`, `getBalance`, `sendPayment` |
+| **`@lumen/types`** | Shared TypeScript interfaces |
+
+---
+
+## License
 
 MIT
