@@ -1,0 +1,40 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    types: [labeled, synchronize, opened, reopened]
+  workflow_dispatch:
+
+jobs:
+  integration:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'integration') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Start Stellar Local Node
+        run: |
+          docker compose -f docker/docker-compose.yml up -d
+          sleep 10
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Run Integration Suite
+        run: pnpm test

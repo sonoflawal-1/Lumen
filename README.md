@@ -1,5 +1,6 @@
 # Lumen
 
+[![CI](https://github.com/sonoflawal-1/Lumen/actions/workflows/ci.yml/badge.svg)](https://github.com/sonoflawal-1/Lumen/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Network](https://img.shields.io/badge/network-Stellar-orange.svg)](https://stellar.org)
 [![Runtime](https://img.shields.io/badge/runtime-TypeScript%20%2B%20Node-blue.svg)](https://nodejs.org)
@@ -15,11 +16,12 @@ Lumen is a wallet SDK for building non-custodial Stellar wallets where the user 
 1. [Features](#features)
 2. [How It Works](#how-it-works)
 3. [Architecture](#architecture)
-4. [Why Lumen Is Different](#why-lumen-is-different)
-5. [Quickstart](#quickstart)
-6. [Packages](#packages)
-7. [Environment](#environment)
-8. [License](#license)
+4. [API & Health Endpoints](#api--health-endpoints)
+5. [Why Lumen Is Different](#why-lumen-is-different)
+6. [Quickstart](#quickstart)
+7. [Packages](#packages)
+8. [Environment](#environment)
+9. [License](#license)
 
 ---
 
@@ -33,6 +35,8 @@ Lumen is a wallet SDK for building non-custodial Stellar wallets where the user 
 | **Policy-controlled** | Spend limits, velocity rules, and destination allowlists enforced on-chain before co-signing. |
 | **Sponsorship** | The server pays XLM reserves for account creation and transaction fees. |
 | **Hardware-backed signing** | `Signer` abstraction supports AWS KMS, CloudHSM, and HashiCorp Vault for production. |
+| **Structured Audit Trail** | 12-factor compatible JSON-lines audit logs correlation via `X-Request-Id`. |
+| **CORS & Security** | Configurable origin allowlists, preflight options validation, and non-credentials health endpoints. |
 
 ---
 
@@ -54,7 +58,23 @@ User creates a wallet
 | Policy | `@lumen/server` | Spend limits, velocity, allowlists enforced before co-signing |
 | Key management | `@lumen/core` | Keypair generation, storage, derivation (OAuth, passphrase) |
 | SDK | `@lumen/web-sdk` | Browser client: `createWallet`, `getBalance`, `sendPayment` |
-| API | Express | `/cosign`, `/fee-bump`, `/wallet/create`, `/policy` |
+| API | Express | `/cosign`, `/fee-bump`, `/wallet/create`, `/policy`, `/healthz/live`, `/healthz/ready` |
+
+---
+
+## API & Health Endpoints
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/health` | GET | Basic network status |
+| `/healthz/live` | GET | Liveness probe (Kubernetes / container orchestrator) |
+| `/healthz/ready` | GET | Readiness probe checking Horizon, Soroban RPC, Fee-Payer balance, and Signers |
+| `/wallet/create` | POST | Sponsor and set up a new 2-of-2 multisig wallet |
+| `/cosign` | POST | Evaluate policy and co-sign user transaction |
+| `/fee-bump` | POST | Wrap transaction in fee-bump envelope |
+| `/fee-bump/submit` | POST | Wrap and submit fee-bumped transaction |
+| `/policy` | POST | Create/update policy rules for a wallet |
+| `/policy/:walletId` | GET | Fetch active policy for a wallet |
 
 ---
 
@@ -115,9 +135,20 @@ pnpm --filter @lumen/server dev
 | Package | Description |
 | --- | --- |
 | **`@lumen/core`** | `StellarClient`, `createSponsoredAccount`, `setupMultisig`, `buildFeeBump`, `pathPayment`, `KeyManager`, `Wallet` |
-| **`@lumen/server`** | `CosignerService`, `FeeSponsorService`, `PolicyEngine`, Express API |
+| **`@lumen/server`** | `CosignerService`, `FeeSponsorService`, `PolicyEngine`, `AuditLogger`, Express API |
 | **`@lumen/web-sdk`** | `LumenClient`: `createWallet`, `getBalance`, `sendPayment` |
 | **`@lumen/types`** | Shared TypeScript interfaces |
+
+---
+
+## Environment
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CORS_ORIGINS` | `http://localhost:3001,http://localhost:5173` | Allowed origins for browser fetch requests (or `*`) |
+| `HEALTH_CHECK_TIMEOUT_MS` | `2000` | Timeout in ms for individual horizon/RPC readiness checks |
+| `LOW_BALANCE_ALERT_THRESHOLD` | `5` | XLM balance threshold for fee-payer health checks |
+| `SIGNER_PROVIDER` | `env` | Signer implementation (`env` or `awskms`) |
 
 ---
 
