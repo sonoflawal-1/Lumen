@@ -11,10 +11,12 @@ import type { Signer } from "@lumen/types";
 import { CosignerService } from "./cosigner/service.js";
 import { FeeSponsorService } from "./fee-sponsor/service.js";
 import { PolicyEngine } from "./policy/engine.js";
+import { WalletStore } from "./wallet/store.js";
 import {
   CosignRequestSchema,
   FeeBumpRequestSchema,
   PolicyRequestSchema,
+  WalletsQuerySchema,
 } from "./validation.js";
 import {
   ValidationError,
@@ -30,6 +32,7 @@ export interface ServerResult {
   cosignerService: CosignerService;
   feeSponsorService: FeeSponsorService;
   policyEngine: PolicyEngine;
+  walletStore: WalletStore;
 }
 
 export interface ServerOpts {
@@ -37,20 +40,23 @@ export interface ServerOpts {
   network?: "testnet" | "mainnet" | "local";
   horizonUrl?: string;
   rpcUrl?: string;
+  apiKey?: string;
+  walletStore?: WalletStore;
   /**
    * Signer used by the co-signer service.
-   * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
+   * Dev/testnet → EnvSigner. Production → AwsKmsSigner or equivalent.
    */
   cosignerSigner: Signer;
   /**
    * Signer used by the fee-sponsor service.
-   * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
+   * Dev/testnet → EnvSigner. Production → AwsKmsSigner or equivalent.
    */
   feePayerSigner: Signer;
 }
 
 export function createServer(opts: ServerOpts): ServerResult {
   const port = opts.port ?? 3000;
+  const apiKey = opts.apiKey ?? process.env.LUMEN_API_KEY ?? "default-api-key";
 
   const client = new StellarClient({
     network: opts.network,
@@ -59,6 +65,7 @@ export function createServer(opts: ServerOpts): ServerResult {
   });
 
   const policyEngine = new PolicyEngine();
+  const walletStore = opts.walletStore ?? new WalletStore();
 
   const cosignerService = new CosignerService({
     client,
@@ -109,7 +116,10 @@ export function createServer(opts: ServerOpts): ServerResult {
       throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
 
-    const feeBumpXdr = await feeSponsorService.wrapFeeBump(parsed.data.xdr);
+    const feeBumpXdr = await feeSponsorService.wrapFeeBump(
+      parsed.data.xdr,
+      parsed.data.walletAddress
+    );
     res.json({ feeBumpXdr });
   }));
 
@@ -119,7 +129,10 @@ export function createServer(opts: ServerOpts): ServerResult {
       throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
 
-    const result = await feeSponsorService.submit(parsed.data.xdr);
+    const result = await feeSponsorService.submit(
+      parsed.data.xdr,
+      parsed.data.walletAddress
+    );
     res.json(result);
   }));
 
@@ -148,6 +161,7 @@ export function createServer(opts: ServerOpts): ServerResult {
     res.json(policy);
   }));
 
+  // Create Wallet Endpoint - returns primary UUID id and public key address
   app.post("/wallet/create", wrapHandler(async (req: Request, res: Response) => {
     const { Wallet } = await import("@lumen/core");
 
@@ -161,7 +175,69 @@ export function createServer(opts: ServerOpts): ServerResult {
     });
 
     const result = await wallet.create();
-    res.json({ address: result.address, publicKey: result.publicKey });
+    const id = crypto.randomUUID();
+    const createdAt = new Date();
+
+    const walletRecord = {
+      id,
+      address: result.address,
+      createdAt,
+    };
+
+    walletStore.add(walletRecord);
+
+    res.json({ id, address: result.address, createdAt });
+  }));
+
+  // Get single wallet by UUID id
+  app.get("/wallet/:id", wrapHandler(async (req: Request, res: Response) => {
+    const walletId = req.params.id as string;
+    const wallet = walletStore.get(walletId) ?? walletStore.getByAddress(walletId);
+
+    if (!wallet) {
+      res.status(404).json({ error: "Wallet not found" });
+      return;
+    }
+
+    const policy = policyEngine.getPolicy(wallet.address);
+
+    res.json({
+      id: wallet.id,
+      address: wallet.address,
+      createdAt: wallet.createdAt,
+      policyId: policy?.id,
+    });
+  }));
+
+  // List all wallets (Paged, API Key Authenticated)
+  app.get("/wallets", wrapHandler(async (req: Request, res: Response) => {
+    const reqApiKey = req.headers["x-api-key"];
+    if (!reqApiKey || reqApiKey !== apiKey) {
+      res.status(401).json({ error: "Unauthorized: Invalid or missing API key" });
+      return;
+    }
+
+    const parsedQuery = WalletsQuerySchema.parse(req.query);
+    const result = walletStore.list(parsedQuery.page, parsedQuery.limit);
+
+    res.json(result);
+  }));
+
+  // Delete / Revoke Co-Signer Authority for Wallet by UUID id
+  app.delete("/wallet/:id", wrapHandler(async (req: Request, res: Response) => {
+    const walletId = req.params.id as string;
+    const wallet = walletStore.get(walletId) ?? walletStore.getByAddress(walletId);
+
+    if (!wallet) {
+      res.status(404).json({ error: "Wallet not found" });
+      return;
+    }
+
+    // Revoke co-signer policy and remove wallet from persistent store
+    policyEngine.removePolicy(wallet.address);
+    walletStore.delete(wallet.id);
+
+    res.json({ success: true, message: `Wallet ${walletId} co-sign authority revoked and deleted` });
   }));
 
   app.use(errorHandler);
@@ -203,5 +279,5 @@ export function createServer(opts: ServerOpts): ServerResult {
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
-  return { app, server, client, cosignerService, feeSponsorService, policyEngine };
+  return { app, server, client, cosignerService, feeSponsorService, policyEngine, walletStore };
 }

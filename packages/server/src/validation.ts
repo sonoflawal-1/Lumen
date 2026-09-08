@@ -7,6 +7,7 @@ export const CosignRequestSchema = z.object({
 
 export const FeeBumpRequestSchema = z.object({
   xdr: z.string().min(1, "xdr is required"),
+  walletAddress: z.string().startsWith("G", "walletAddress must be a valid Stellar public key").optional(),
 });
 
 const SpendLimitSchema = z.object({
@@ -38,6 +39,12 @@ export const PolicyRequestSchema = z.object({
   rules: z.array(PolicyRuleSchema).min(1, "At least one rule is required"),
 });
 
+export const WalletsQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(10),
+});
+
 export type CosignRequest = z.infer<typeof CosignRequestSchema>;
 export type FeeBumpRequest = z.infer<typeof FeeBumpRequestSchema>;
 export type PolicyRequest = z.infer<typeof PolicyRequestSchema>;
+export type WalletsQuery = z.infer<typeof WalletsQuerySchema>;

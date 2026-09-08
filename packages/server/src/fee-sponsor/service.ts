@@ -17,6 +17,8 @@ export class FeeSponsorService {
   private client: StellarClient;
   private signer: Signer;
   private baseFee: string;
+  private usedNonces: Set<string> = new Set();
+  private maxCacheSize = 10000;
 
   constructor(opts: FeeSponsorOpts) {
     this.client = opts.client;
@@ -28,20 +30,55 @@ export class FeeSponsorService {
     return this.signer.publicKey();
   }
 
-  async wrapFeeBump(innerTxXdr: string): Promise<string> {
-    const parsed = TransactionBuilder.fromXDR(
-      innerTxXdr,
-      this.client.networkPassphrase
-    );
-    const innerTx = parsed instanceof Transaction ? parsed : null;
-    if (!innerTx) {
-      throw new Error("Expected a regular transaction, not a fee-bump");
+  /** Clear tracked nonces/hashes (useful for testing or cache resets) */
+  clearUsedNonces(): void {
+    this.usedNonces.clear();
+  }
+
+  async wrapFeeBump(
+    innerTxXdr: string,
+    walletAddress?: string
+  ): Promise<string> {
+    let parsed;
+    try {
+      parsed = TransactionBuilder.fromXDR(
+        innerTxXdr,
+        this.client.networkPassphrase
+      );
+    } catch (e: any) {
+      throw new Error(`Invalid transaction XDR: ${e.message}`);
     }
 
-    // Build the fee-bump envelope.  buildFeeBumpTransaction derives the
-    // fee-source account from a Keypair; we create a public-key-only Keypair
-    // so the private key is never needed here.  Signing uses our Signer
-    // abstraction so the private key stays in KMS / never in memory.
+    if (!(parsed instanceof Transaction)) {
+      throw new Error("Inner transaction cannot be a fee-bump transaction");
+    }
+
+    const innerTx = parsed;
+
+    // 1. Verify walletAddress matches inner transaction source account if provided
+    if (walletAddress && innerTx.source !== walletAddress) {
+      throw new Error(
+        `Inner transaction source account (${innerTx.source}) does not match walletAddress (${walletAddress})`
+      );
+    }
+
+    // 2. Replay check: ensure this inner transaction hash hasn't already been fee-bumped
+    const txHash = innerTx.hash().toString("hex");
+    if (this.usedNonces.has(txHash)) {
+      throw new Error(
+        `Replay attack detected: Transaction ${txHash} has already been sponsored/submitted`
+      );
+    }
+
+    // Mark nonce/hash as used
+    if (this.usedNonces.size >= this.maxCacheSize) {
+      // Remove oldest item from set
+      const first = this.usedNonces.values().next().value;
+      if (first) this.usedNonces.delete(first);
+    }
+    this.usedNonces.add(txHash);
+
+    // Build the fee-bump envelope
     const feeSourceKeypair = Keypair.fromPublicKey(this.signer.publicKey());
     const feeBump = TransactionBuilder.buildFeeBumpTransaction(
       feeSourceKeypair,
@@ -50,9 +87,9 @@ export class FeeSponsorService {
       this.client.networkPassphrase
     );
 
-    // Sign via the abstracted Signer.
-    const txHash = feeBump.hash();
-    const signature = await this.signer.sign(txHash);
+    // Sign via the abstracted Signer
+    const feeBumpHash = feeBump.hash();
+    const signature = await this.signer.sign(feeBumpHash);
     const hint = feeSourceKeypair.rawPublicKey().slice(-4);
 
     feeBump.signatures.push({
@@ -64,9 +101,10 @@ export class FeeSponsorService {
   }
 
   async submit(
-    innerTxXdr: string
+    innerTxXdr: string,
+    walletAddress?: string
   ): Promise<{ hash: string; feeBumpHash: string }> {
-    const feeBumpXdr = await this.wrapFeeBump(innerTxXdr);
+    const feeBumpXdr = await this.wrapFeeBump(innerTxXdr, walletAddress);
     const parsed = TransactionBuilder.fromXDR(
       feeBumpXdr,
       this.client.networkPassphrase

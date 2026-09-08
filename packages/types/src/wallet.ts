@@ -12,3 +12,11 @@ export interface WalletInstance {
   state: WalletState;
   createdAt: Date;
 }
+
+export interface WalletRecord {
+  id: string;
+  address: string;
+  createdAt: Date | string;
+  policyId?: string;
+}
+
