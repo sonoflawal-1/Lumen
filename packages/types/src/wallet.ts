@@ -14,9 +14,9 @@ export interface WalletInstance {
 }
 
 export interface WalletRecord {
-  id: string;
-  address: string;
-  createdAt: Date | string;
-  policyId?: string;
+  id: string; // UUID
+  address: string; // Stellar G... public key
+  userDevicePublicKey: string; // G... of user device key
+  createdAt: Date;
 }
 
