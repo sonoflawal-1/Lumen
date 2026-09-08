@@ -85,28 +85,71 @@ pnpm install
 ### 2. Start the local Stellar network
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+pnpm dev:stellar
 ```
 
-### 3. Configure your environment
+> Or run using `docker compose`:
+> ```bash
+> docker compose -f docker/docker-compose.yml up -d
+> ```
+
+<details>
+<summary>Raw docker run command (standalone container)</summary>
+
+```bash
+docker run --rm -p 8000:8000 -p 8080:8080 -p 6000:6000 --platform linux/amd64 stellar/quickstart:testing --local --enable-stellar-rpc
+```
+
+For full details on local environment ports (`8000`, `8080`, `6000`) and network configuration, see [docs/local-development.md](docs/local-development.md).
+
+</details>
+
+### 3. Docker Management Scripts
+
+- `pnpm dev:stellar`: Starts local Stellar Docker network container using compose.
+- `pnpm dev:stellar:down`: Brings down the local Stellar container.
+- `pnpm dev:stellar:logs`: Streams logs from the local Stellar container.
+- `pnpm test:integration`: Runs docker compose fixture and executes integration tests.
+
+### 4. Configure your environment
 
 ```bash
 cp .env.example .env
 # Edit .env with your keys and network settings
 ```
 
-### 4. Build and test
+### 5. Build and test
 
 ```bash
 pnpm build
 pnpm test
 ```
 
-### 5. Start the server
+### 6. Start the server
 
 ```bash
 pnpm --filter @lumen/server dev
 ```
+
+---
+
+## API Endpoints
+
+| Endpoint | Method | Auth | Description |
+| --- | --- | --- | --- |
+| `/health` | GET | None | Server health and network status |
+| `/cosign` | POST | None | Co-sign valid Stellar transactions after policy check |
+| `/fee-bump` | POST | None | Wrap transaction in fee-bump transaction |
+| `/fee-bump/submit` | POST | None | Wrap and submit fee-bumped transaction |
+| `/policy/:walletId` | GET | None | Retrieve policy configuration for wallet |
+| `/policy` | POST | None | Add policy configuration for wallet |
+| `/wallet/create` | POST | Optional | Generate 2-of-2 multisig wallet, register record, return `{ id, address, userDevicePublicKey }` |
+| `/wallet/:id` | GET | API Key | Retrieve wallet record by UUID `id` |
+| `/wallet/by-address/:address` | GET | API Key | Retrieve wallet record by Stellar address |
+| `/wallets` | GET | API Key | Paged listing of wallets (`?limit=50&cursor=...`) |
+| `/wallets/:address` | GET | API Key | Retrieve single wallet by address for SDK recovery |
+| `/wallet/:id` | DELETE | API Key | Remove server co-signer on-chain (`setOptions` weight 0) and delete wallet record |
+
 
 ---
 

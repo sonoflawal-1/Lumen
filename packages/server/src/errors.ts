@@ -32,6 +32,26 @@ export class StellarError extends Error {
   }
 }
 
+export class AuthError extends Error {
+  statusCode: number;
+
+  constructor(message = "Unauthorized: Invalid or missing API key", statusCode = 401) {
+    super(message);
+    this.name = "AuthError";
+    this.statusCode = statusCode;
+  }
+}
+
+export class NotFoundError extends Error {
+  statusCode: number;
+
+  constructor(message = "Resource not found", statusCode = 404) {
+    super(message);
+    this.name = "NotFoundError";
+    this.statusCode = statusCode;
+  }
+}
+
 export type ErrorResponse = {
   error: string;
   details?: unknown;
@@ -52,7 +72,7 @@ export const errorHandler = (
     });
   }
 
-  if (err instanceof PolicyError) {
+  if (err instanceof PolicyError || err instanceof AuthError || err instanceof NotFoundError) {
     return res.status(err.statusCode).json({
       error: err.message,
     });
