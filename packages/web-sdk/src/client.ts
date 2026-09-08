@@ -26,7 +26,7 @@ export class LumenClient {
       horizonUrl: opts.horizonUrl,
       rpcUrl: opts.rpcUrl,
     });
-    this.sponsorKeypair = Keypair.fromSecret(opts.sponsorSecret);
+    this.serverUrl = opts.serverUrl.replace(/\/$/, "");
     this.serverPublicKey = opts.serverPublicKey;
     this.serverUrl = opts.serverUrl ?? "http://localhost:3000";
     this.apiKey = opts.apiKey;
@@ -39,16 +39,46 @@ export class LumenClient {
       serverPublicKey: this.serverPublicKey,
     });
 
-    const { address } = await wallet.create();
-    const id = address;
+    if (!res.ok) {
+      throw new Error(`Failed to create wallet on server: ${res.statusText}`);
+    }
 
-    this.wallets.set(id, wallet);
+    const data = (await res.json()) as { id: string; address: string };
+    const entry: ClientWalletEntry = {
+      id: data.id,
+      address: data.address,
+    };
+
+    this.wallets.set(data.id, entry);
+    this.wallets.set(data.address, entry);
 
     return { address, id, userDevicePublicKey: userDevicePublicKey ?? address };
   }
 
-  getWallet(id: string): Wallet | undefined {
-    return this.wallets.get(id);
+  async getWallet(
+    id: string
+  ): Promise<{ id: string; address: string; createdAt?: string; policyId?: string }> {
+    const res = await fetch(`${this.serverUrl}/wallet/${id}`);
+    if (!res.ok) {
+      throw new Error(`Wallet not found: ${id}`);
+    }
+
+    const data = (await res.json()) as {
+      id: string;
+      address: string;
+      createdAt?: string;
+      policyId?: string;
+    };
+
+    const entry: ClientWalletEntry = {
+      id: data.id,
+      address: data.address,
+    };
+
+    this.wallets.set(data.id, entry);
+    this.wallets.set(data.address, entry);
+
+    return data;
   }
 
   listWallets(): Wallet[] {
@@ -127,11 +157,17 @@ export class LumenClient {
   }
 
   async getBalance(id: string, assetCode?: string): Promise<string> {
-    const wallet = this.wallets.get(id);
-    if (!wallet) throw new Error(`Wallet not found: ${id}`);
+    let wallet = this.wallets.get(id);
+    if (!wallet) {
+      const fetched = await this.getWallet(id);
+      wallet = { id: fetched.id, address: fetched.address };
+    }
+
+    const account = await this.client.horizon.loadAccount(wallet.address);
 
     if (!assetCode || assetCode === "XLM") {
-      return wallet.getBalance();
+      const balance = account.balances.find((b: any) => b.asset_type === "native");
+      return balance?.balance ?? "0";
     }
 
     const network = this.client.config.network;
@@ -142,7 +178,10 @@ export class LumenClient {
       );
     }
 
-    return wallet.getBalance(knownAsset);
+    const balance = account.balances.find(
+      (b: any) => b.asset_code === knownAsset.getCode() && b.asset_issuer === knownAsset.getIssuer()
+    );
+    return (balance as any)?.balance ?? "0";
   }
 
   async sendPayment(
@@ -151,8 +190,11 @@ export class LumenClient {
     assetCode: string,
     amount: string
   ): Promise<{ hash: string }> {
-    const wallet = this.wallets.get(id);
-    if (!wallet) throw new Error(`Wallet not found: ${id}`);
+    let wallet = this.wallets.get(id);
+    if (!wallet) {
+      const fetched = await this.getWallet(id);
+      wallet = { id: fetched.id, address: fetched.address };
+    }
 
     let asset: Asset;
     if (assetCode === "XLM") {
@@ -168,7 +210,60 @@ export class LumenClient {
       asset = knownAsset;
     }
 
-    return wallet.send(destination, asset, amount);
+    const account = await this.client.horizon.loadAccount(wallet.address);
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.client.networkPassphrase,
+    })
+      .addOperation(
+        Operation.payment({
+          destination,
+          asset,
+          amount,
+        })
+      )
+      .setTimeout(180)
+      .build();
+
+    if (wallet.keypair) {
+      tx.sign(wallet.keypair);
+    }
+
+    // 1. Request co-signing from Lumen server
+    const cosignRes = await fetch(`${this.serverUrl}/cosign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        xdr: tx.toXDR(),
+        walletAddress: wallet.address,
+      }),
+    });
+
+    if (!cosignRes.ok) {
+      const err = await cosignRes.json().catch(() => ({ error: cosignRes.statusText }));
+      throw new Error(`Co-signing failed: ${(err as any).error ?? cosignRes.statusText}`);
+    }
+
+    const cosignData = (await cosignRes.json()) as { signedXdr: string };
+
+    // 2. Submit transaction via fee-sponsor on Lumen server
+    const feeBumpRes = await fetch(`${this.serverUrl}/fee-bump/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        xdr: cosignData.signedXdr,
+        walletAddress: wallet.address,
+      }),
+    });
+
+    if (!feeBumpRes.ok) {
+      const err = await feeBumpRes.json().catch(() => ({ error: feeBumpRes.statusText }));
+      throw new Error(`Fee-bump submission failed: ${(err as any).error ?? feeBumpRes.statusText}`);
+    }
+
+    const feeBumpData = (await feeBumpRes.json()) as { hash: string };
+    return { hash: feeBumpData.hash };
   }
 }
 

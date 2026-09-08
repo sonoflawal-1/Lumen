@@ -7,16 +7,18 @@ The Lumen `PolicyEngine` allows integrators to enforce rules on wallets before t
 ## Table of Contents
 1. [TypeScript Interfaces](#1-typescript-interfaces)
 2. [JSON Schema](#2-json-schema)
-3. [API Reference](#3-api-reference)
+3. [Evaluation & Commit Semantics](#3-evaluation--commit-semantics)
+4. [API Reference](#4-api-reference)
    - [POST /policy](#post-policy)
    - [GET /policy/:walletId](#get-policywalletid)
-4. [Example Configurations](#4-example-configurations)
+5. [Example Configurations](#5-example-configurations)
    - [Spend Limit Policy](#spend-limit-policy)
    - [Velocity Check Policy](#velocity-check-policy)
    - [Allowlist Policy](#allowlist-policy)
    - [Combined Multi-Rule Policy](#combined-multi-rule-policy)
 
 ---
+
 
 ## 1. TypeScript Interfaces
 
@@ -168,7 +170,19 @@ Integrators can use the JSON schema below to validate payloads or autogenerate c
 
 ---
 
-## 3. API Reference
+## 3. Evaluation & Commit Semantics
+
+The `PolicyEngine` enforces a strictly isolated **"dry run then commit"** pattern to guarantee that policy tracking state (such as daily spend accumulators and velocity window counters) is only updated when a transaction passes **all** rules.
+
+### Key Commit Guarantees:
+
+- **Atomic Evaluation**: All configured rules for a wallet are evaluated speculatively against current tracking state.
+- **Rejection Isolation**: If any rule rejects the transaction (or if a rule evaluation fails), zero mutations are applied to spend limits or velocity tracking. For example, repeated attempts to send transactions exceeding `maxPerTx` will not consume the user's `maxDaily` spending budget.
+- **`commitOnApprove` Flag**: The `evaluate` method accepts an optional `commitOnApprove` option (`true` by default). When set to `false`, integrators can dry-run policy checks without consuming tracking state.
+
+---
+
+## 4. API Reference
 
 ### POST `/policy`
 
