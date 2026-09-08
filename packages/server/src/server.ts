@@ -375,4 +375,4 @@ export function createServer(opts: ServerOpts): ServerResult {
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
   return { app, server, client, cosignerService, feeSponsorService, policyEngine, walletStore };
-}
+}
