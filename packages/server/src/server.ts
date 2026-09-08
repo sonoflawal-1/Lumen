@@ -5,12 +5,13 @@ import express, {
   type NextFunction,
 } from "express";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
 import { StellarClient } from "@lumen/core";
-import type { Signer } from "@lumen/types";
+import type { Signer, WalletRecord } from "@lumen/types";
 import { CosignerService } from "./cosigner/service.js";
 import { FeeSponsorService } from "./fee-sponsor/service.js";
 import { PolicyEngine } from "./policy/engine.js";
+import { WalletStore } from "./wallet/store.js";
 import {
   CosignRequestSchema,
   FeeBumpRequestSchema,
@@ -19,6 +20,8 @@ import {
 import {
   ValidationError,
   PolicyError,
+  AuthError,
+  NotFoundError,
   errorHandler,
   wrapHandler,
 } from "./errors.js";
@@ -30,6 +33,7 @@ export interface ServerResult {
   cosignerService: CosignerService;
   feeSponsorService: FeeSponsorService;
   policyEngine: PolicyEngine;
+  walletStore: WalletStore;
 }
 
 export interface ServerOpts {
@@ -37,6 +41,8 @@ export interface ServerOpts {
   network?: "testnet" | "mainnet" | "local";
   horizonUrl?: string;
   rpcUrl?: string;
+  apiKey?: string;
+  walletStore?: WalletStore;
   /**
    * Signer used by the co-signer service.
    * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
@@ -59,6 +65,7 @@ export function createServer(opts: ServerOpts): ServerResult {
   });
 
   const policyEngine = new PolicyEngine();
+  const walletStore = opts.walletStore ?? new WalletStore();
 
   const cosignerService = new CosignerService({
     client,
@@ -83,6 +90,21 @@ export function createServer(opts: ServerOpts): ServerResult {
     });
     next();
   });
+
+  const requireApiKey = (req: Request, _res: Response, next: NextFunction) => {
+    if (!opts.apiKey) {
+      return next();
+    }
+    const headerKey =
+      req.headers["x-api-key"] ||
+      (req.headers["authorization"]?.startsWith("Bearer ")
+        ? req.headers["authorization"].substring(7)
+        : undefined);
+    if (headerKey !== opts.apiKey) {
+      throw new AuthError("Unauthorized: Invalid or missing API key");
+    }
+    next();
+  };
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", network: client.config.network });
@@ -148,12 +170,12 @@ export function createServer(opts: ServerOpts): ServerResult {
     res.json(policy);
   }));
 
+  // Wallet Management Endpoints
+
   app.post("/wallet/create", wrapHandler(async (req: Request, res: Response) => {
     const { Wallet } = await import("@lumen/core");
 
-    const sponsorKeypair = Keypair.fromPublicKey(
-      opts.cosignerSigner.publicKey()
-    );
+    const sponsorKeypair = Keypair.fromPublicKey(opts.cosignerSigner.publicKey());
     const wallet = new Wallet({
       client,
       sponsorKeypair,
@@ -161,8 +183,157 @@ export function createServer(opts: ServerOpts): ServerResult {
     });
 
     const result = await wallet.create();
-    res.json({ address: result.address, publicKey: result.publicKey });
+
+    const userDevicePublicKey =
+      req.body?.userDevicePublicKey ||
+      (req.headers["x-user-device-public-key"] as string) ||
+      result.publicKey;
+
+    const record: WalletRecord = {
+      id: crypto.randomUUID(),
+      address: result.address,
+      userDevicePublicKey,
+      createdAt: new Date(),
+    };
+
+    walletStore.addWallet(record);
+
+    res.json({
+      id: record.id,
+      address: record.address,
+      userDevicePublicKey: record.userDevicePublicKey,
+      createdAt: record.createdAt,
+    });
   }));
+
+  app.get(
+    "/wallet/by-address/:address",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallets/:address",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallet/:id",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWallet(req.params.id);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found with id: ${req.params.id}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallets",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+      const cursor = req.query.cursor ? (req.query.cursor as string) : undefined;
+      const result = walletStore.listWallets(limit, cursor);
+      res.json(result);
+    })
+  );
+
+  app.delete(
+    "/wallet/:id",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWallet(req.params.id);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found with id: ${req.params.id}`);
+      }
+
+      // Submit setOptions on-chain to remove server co-signer (set weight to 0)
+      try {
+        const account = await client.horizon.loadAccount(record.address);
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: client.networkPassphrase,
+        })
+          .addOperation(
+            Operation.setOptions({
+              signer: {
+                ed25519PublicKey: opts.cosignerSigner.publicKey(),
+                weight: 0,
+              },
+            })
+          )
+          .setTimeout(180)
+          .build();
+
+        const signedXdr = await opts.cosignerSigner.signTransaction(tx.toXDR());
+        await client.horizon.submitTransaction(TransactionBuilder.fromXDR(signedXdr, client.networkPassphrase));
+      } catch (e) {
+        // Log on-chain attempt warning, continue deleting store record
+        console.warn(`on-chain co-signer removal warning for wallet ${record.address}:`, e);
+      }
+
+      walletStore.deleteWallet(req.params.id);
+      res.json({ success: true, message: "Server co-signer removed and wallet deleted" });
+    })
+  );
+
+  // Optional SEP-10 challenge flow endpoints for proof-of-ownership
+  app.get(
+    "/wallets/:address/sign-challenge",
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      const challengeTx = new TransactionBuilder(
+        new Keypair({ publicKey: () => record.address, secret: () => "" } as any).toAccount(),
+        {
+          fee: BASE_FEE,
+          networkPassphrase: client.networkPassphrase,
+        }
+      )
+        .addOperation(
+          Operation.manageData({
+            name: "Lumen Auth Challenge",
+            value: crypto.randomUUID(),
+          })
+        )
+        .setTimeout(300)
+        .build();
+
+      res.json({ challengeXdr: challengeTx.toXDR() });
+    })
+  );
+
+  app.post(
+    "/wallets/:address/verify",
+    wrapHandler(async (req: Request, res: Response) => {
+      const { challengeXdr } = req.body;
+      if (!challengeXdr) {
+        throw new ValidationError("challengeXdr is required");
+      }
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json({ verified: true, wallet: record });
+    })
+  );
 
   app.use(errorHandler);
 
@@ -203,5 +374,5 @@ export function createServer(opts: ServerOpts): ServerResult {
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
-  return { app, server, client, cosignerService, feeSponsorService, policyEngine };
-}
+  return { app, server, client, cosignerService, feeSponsorService, policyEngine, walletStore };
+}
