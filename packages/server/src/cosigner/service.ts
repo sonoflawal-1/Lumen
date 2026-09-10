@@ -3,6 +3,13 @@ import type { Signer } from "@lumen/types";
 import type { StellarClient } from "@lumen/core";
 import { PolicyEngine } from "../policy/engine.js";
 
+export class UserSignatureMissingError extends Error {
+  constructor(message = "User device signature missing on transaction") {
+    super(message);
+    this.name = "UserSignatureMissingError";
+  }
+}
+
 export interface CosignerOpts {
   client: StellarClient;
   /** Production: use an AwsKmsSigner. Dev/testnet: use an EnvSigner. */
@@ -13,6 +20,7 @@ export interface CosignerOpts {
 export interface CosignRequest {
   xdr: string;
   walletAddress: string;
+  userPublicKey?: string;
 }
 
 export interface CosignResult {
@@ -51,6 +59,62 @@ export class CosignerService {
       };
     }
 
+    // 1. Source account verification: Ensure transaction source matches wallet address
+    if (tx.source !== request.walletAddress) {
+      return {
+        signedXdr: "",
+        approved: false,
+        reason: `Source account mismatch: transaction source (${tx.source}) does not match wallet address (${request.walletAddress})`,
+      };
+    }
+
+    // 2. User device signature verification
+    const txHash = tx.hash();
+    if (!tx.signatures || tx.signatures.length === 0) {
+      return {
+        signedXdr: "",
+        approved: false,
+        reason: "UserSignatureMissingError: User device signature missing",
+      };
+    }
+
+    let hasUserSignature = false;
+    if (request.userPublicKey) {
+      const userKp = Keypair.fromPublicKey(request.userPublicKey);
+      hasUserSignature = tx.signatures.some((sig: any) => {
+        try {
+          const sigBuffer = typeof sig.signature === "function" ? sig.signature() : sig.signature;
+          return userKp.verify(txHash, sigBuffer);
+        } catch {
+          return false;
+        }
+      });
+    } else {
+      // Fallback: Verify signature against walletAddress keypair
+      try {
+        const walletKp = Keypair.fromPublicKey(request.walletAddress);
+        hasUserSignature = tx.signatures.some((sig: any) => {
+          try {
+            const sigBuffer = typeof sig.signature === "function" ? sig.signature() : sig.signature;
+            return walletKp.verify(txHash, sigBuffer);
+          } catch {
+            return false;
+          }
+        });
+      } catch {
+        hasUserSignature = false;
+      }
+    }
+
+    if (!hasUserSignature) {
+      return {
+        signedXdr: "",
+        approved: false,
+        reason: "UserSignatureMissingError: Transaction must be signed by user device key before co-signing",
+      };
+    }
+
+    // 3. Policy evaluation
     const policyResult = this.policyEngine.evaluate({
       walletAddress: request.walletAddress,
       transaction: tx,
@@ -64,12 +128,10 @@ export class CosignerService {
       };
     }
 
-    // Sign using the abstracted Signer (KMS or env-keypair).
-    const txHash = tx.hash();
+    // 4. Sign using the abstracted Signer (KMS or env-keypair)
     const signature = await this.signer.sign(txHash);
 
-    // Attach the signature to the transaction envelope using the decorated hint
-    // format that Stellar expects: last 4 bytes of the raw public key.
+    // Attach signature using Stellar hint format (last 4 bytes of public key)
     const rawPublicKey = Keypair.fromPublicKey(
       this.signer.publicKey()
     ).rawPublicKey();

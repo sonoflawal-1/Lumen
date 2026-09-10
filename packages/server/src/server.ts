@@ -62,13 +62,13 @@ export function createServer(opts: ServerOpts): ServerResult {
 
   app.post("/cosign", async (req, res) => {
     try {
-      const { xdr, walletAddress } = req.body;
+      const { xdr, walletAddress, userPublicKey } = req.body;
       if (!xdr || !walletAddress) {
         res.status(400).json({ error: "Missing xdr or walletAddress" });
         return;
       }
 
-      const result = await cosignerService.cosign({ xdr, walletAddress });
+      const result = await cosignerService.cosign({ xdr, walletAddress, userPublicKey });
 
       if (!result.approved) {
         res.status(403).json({ error: result.reason });
@@ -154,7 +154,11 @@ export function createServer(opts: ServerOpts): ServerResult {
       });
 
       const result = await wallet.create();
-      res.json({ address: result.address, publicKey: result.publicKey });
+      res.json({
+        address: result.address,
+        publicKey: result.publicKey,
+        devicePublicKey: result.publicKey,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

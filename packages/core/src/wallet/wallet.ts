@@ -1,4 +1,13 @@
-import { Keypair, Asset, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
+import {
+  Keypair,
+  Asset,
+  Operation,
+  TransactionBuilder,
+  BASE_FEE,
+  Memo,
+  Account,
+  Transaction,
+} from "@stellar/stellar-sdk";
 import type { StellarClient } from "../stellar/client.js";
 import { createSponsoredAccount } from "../stellar/account.js";
 import { setupMultisig } from "../stellar/multisig.js";
@@ -8,6 +17,17 @@ export interface WalletOpts {
   client: StellarClient;
   sponsorKeypair: Keypair;
   serverPublicKey: string;
+}
+
+export interface SendOpts {
+  destination?: string;
+  asset?: Asset;
+  amount?: string;
+  memo?: Memo | string | number | Buffer;
+  timebounds?: { minTime?: number | string; maxTime?: number | string } | number;
+  baseFee?: number | string;
+  extraOperations?: Operation[];
+  sequenceNumber?: string;
 }
 
 export class Wallet {
@@ -65,25 +85,91 @@ export class Wallet {
     return (balance as any)?.balance ?? "0";
   }
 
-  async send(destination: string, asset: Asset, amount: string): Promise<{ hash: string }> {
+  async buildTransaction(opts: SendOpts): Promise<Transaction> {
+    if (!this.address) throw new Error("Wallet not initialized");
+
+    let accountObj: Account;
+
+    if (opts.sequenceNumber) {
+      accountObj = new Account(this.address, opts.sequenceNumber);
+    } else {
+      const horizonAccount = await this.client.horizon.loadAccount(this.address);
+      accountObj = new Account(this.address, horizonAccount.sequence);
+    }
+
+    const builder = new TransactionBuilder(accountObj, {
+      fee: String(opts.baseFee ?? BASE_FEE),
+      networkPassphrase: this.client.networkPassphrase,
+    });
+
+    if (opts.destination && opts.asset && opts.amount) {
+      builder.addOperation(
+        Operation.payment({
+          destination: opts.destination,
+          asset: opts.asset,
+          amount: opts.amount,
+        })
+      );
+    }
+
+    if (opts.extraOperations && opts.extraOperations.length > 0) {
+      for (const op of opts.extraOperations) {
+        builder.addOperation(op);
+      }
+    }
+
+    if (opts.memo) {
+      if (opts.memo instanceof Memo) {
+        builder.addMemo(opts.memo);
+      } else if (typeof opts.memo === "string") {
+        builder.addMemo(Memo.text(opts.memo));
+      } else if (typeof opts.memo === "number") {
+        builder.addMemo(Memo.id(String(opts.memo)));
+      } else if (Buffer.isBuffer(opts.memo)) {
+        builder.addMemo(Memo.hash(opts.memo.toString("hex")));
+      }
+    }
+
+    if (opts.timebounds !== undefined) {
+      if (typeof opts.timebounds === "number") {
+        builder.setTimeout(opts.timebounds);
+      } else {
+        builder.setTimebounds({
+          minTime: String(opts.timebounds.minTime ?? 0),
+          maxTime: String(opts.timebounds.maxTime ?? 0),
+        });
+      }
+    } else {
+      builder.setTimeout(180);
+    }
+
+    return builder.build();
+  }
+
+  async send(
+    destinationOrOpts: string | SendOpts,
+    asset?: Asset,
+    amount?: string,
+    opts?: Partial<SendOpts>
+  ): Promise<{ hash: string }> {
     if (!this._keypair) throw new Error("Wallet not initialized");
 
-    const account = await this.client.horizon.loadAccount(this.address);
+    let sendOpts: SendOpts;
+    if (typeof destinationOrOpts === "object") {
+      sendOpts = destinationOrOpts;
+    } else {
+      if (!asset || !amount) {
+        throw new Error("Asset and amount are required when destination is passed as first argument");
+      }
+      sendOpts = {
+        destination: destinationOrOpts,
+        asset,
+        amount,
+        ...opts,
+      };
+    }
 
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.client.networkPassphrase,
-    })
-      .addOperation(
-        Operation.payment({
-          destination,
-          asset,
-          amount,
-        })
-      )
-      .setTimeout(180)
-      .build();
-
+    const tx = await this.buildTransaction(sendOpts);
     tx.sign(this._keypair);
 
     const result = await this.client.horizon.submitTransaction(tx);
