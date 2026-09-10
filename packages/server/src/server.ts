@@ -1,17 +1,39 @@
-import express, { type Express } from "express";
-import { Keypair } from "@stellar/stellar-sdk";
+import express, {
+  type Express,
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import { Keypair, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
 import { StellarClient } from "@lumen/core";
-import type { Signer } from "@lumen/types";
+import type { Signer, WalletRecord } from "@lumen/types";
 import { CosignerService } from "./cosigner/service.js";
 import { FeeSponsorService } from "./fee-sponsor/service.js";
 import { PolicyEngine } from "./policy/engine.js";
+import { WalletStore } from "./wallet/store.js";
+import {
+  CosignRequestSchema,
+  FeeBumpRequestSchema,
+  PolicyRequestSchema,
+} from "./validation.js";
+import {
+  ValidationError,
+  PolicyError,
+  AuthError,
+  NotFoundError,
+  errorHandler,
+  wrapHandler,
+} from "./errors.js";
 
 export interface ServerResult {
   app: Express;
+  server: HttpServer;
   client: StellarClient;
   cosignerService: CosignerService;
   feeSponsorService: FeeSponsorService;
   policyEngine: PolicyEngine;
+  walletStore: WalletStore;
 }
 
 export interface ServerOpts {
@@ -19,6 +41,8 @@ export interface ServerOpts {
   network?: "testnet" | "mainnet" | "local";
   horizonUrl?: string;
   rpcUrl?: string;
+  apiKey?: string;
+  walletStore?: WalletStore;
   /**
    * Signer used by the co-signer service.
    * Dev/testnet → EnvSigner.  Production → AwsKmsSigner or equivalent.
@@ -41,6 +65,7 @@ export function createServer(opts: ServerOpts): ServerResult {
   });
 
   const policyEngine = new PolicyEngine();
+  const walletStore = opts.walletStore ?? new WalletStore();
 
   const cosignerService = new CosignerService({
     client,
@@ -56,120 +81,298 @@ export function createServer(opts: ServerOpts): ServerResult {
   const app = express();
   app.use(express.json());
 
+  let activeRequests = 0;
+
+  app.use((_req: Request, _res: Response, next: NextFunction) => {
+    activeRequests++;
+    _res.on("finish", () => {
+      activeRequests--;
+    });
+    next();
+  });
+
+  const requireApiKey = (req: Request, _res: Response, next: NextFunction) => {
+    if (!opts.apiKey) {
+      return next();
+    }
+    const headerKey =
+      req.headers["x-api-key"] ||
+      (req.headers["authorization"]?.startsWith("Bearer ")
+        ? req.headers["authorization"].substring(7)
+        : undefined);
+    if (headerKey !== opts.apiKey) {
+      throw new AuthError("Unauthorized: Invalid or missing API key");
+    }
+    next();
+  };
+
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", network: client.config.network });
   });
 
-  app.post("/cosign", async (req, res) => {
-    try {
-      const { xdr, walletAddress, userPublicKey } = req.body;
-      if (!xdr || !walletAddress) {
-        res.status(400).json({ error: "Missing xdr or walletAddress" });
-        return;
-      }
-
-      const result = await cosignerService.cosign({ xdr, walletAddress, userPublicKey });
-
-      if (!result.approved) {
-        res.status(403).json({ error: result.reason });
-        return;
-      }
-
-      res.json({ signedXdr: result.signedXdr });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+  app.post("/cosign", wrapHandler(async (req: Request, res: Response) => {
+    const parsed = CosignRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
-  });
 
-  app.post("/fee-bump", async (req, res) => {
-    try {
-      const { xdr } = req.body;
-      if (!xdr) {
-        res.status(400).json({ error: "Missing xdr" });
-        return;
-      }
+    const result = await cosignerService.cosign(parsed.data);
 
-      const feeBumpXdr = await feeSponsorService.wrapFeeBump(xdr);
-      res.json({ feeBumpXdr });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    if (!result.approved) {
+      throw new PolicyError(result.reason ?? "Transaction denied by policy");
     }
-  });
 
-  app.post("/fee-bump/submit", async (req, res) => {
-    try {
-      const { xdr } = req.body;
-      if (!xdr) {
-        res.status(400).json({ error: "Missing xdr" });
-        return;
-      }
+    res.json({ signedXdr: result.signedXdr });
+  }));
 
-      const result = await feeSponsorService.submit(xdr);
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+  app.post("/fee-bump", wrapHandler(async (req: Request, res: Response) => {
+    const parsed = FeeBumpRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
-  });
 
-  app.get("/policy/:walletId", (req, res) => {
-    const policy = policyEngine.getPolicy(req.params.walletId);
+    const feeBumpXdr = await feeSponsorService.wrapFeeBump(parsed.data.xdr);
+    res.json({ feeBumpXdr });
+  }));
+
+  app.post("/fee-bump/submit", wrapHandler(async (req: Request, res: Response) => {
+    const parsed = FeeBumpRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
+    }
+
+    const result = await feeSponsorService.submit(parsed.data.xdr);
+    res.json(result);
+  }));
+
+  app.get("/policy/:walletId", (req: Request, res: Response) => {
+    const policy = policyEngine.getPolicy(req.params.walletId as string);
     if (!policy) {
-      res.status(404).json({ error: "No policy found" });
-      return;
+      throw new PolicyError("No policy found", 404);
     }
     res.json(policy);
   });
 
-  app.post("/policy", (req, res) => {
-    const { walletId, rules } = req.body;
-    if (!walletId || !rules) {
-      res.status(400).json({ error: "Missing walletId or rules" });
-      return;
+  app.post("/policy", wrapHandler(async (req: Request, res: Response) => {
+    const parsed = PolicyRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError("Validation failed", parsed.error.flatten().fieldErrors);
     }
 
     const policy = {
       id: crypto.randomUUID(),
-      walletId,
-      rules,
+      walletId: parsed.data.walletId,
+      rules: parsed.data.rules,
       createdAt: new Date(),
     };
 
     policyEngine.addPolicy(policy);
     res.json(policy);
-  });
+  }));
 
-  app.post("/wallet/create", async (req, res) => {
-    try {
-      const { Wallet } = await import("@lumen/core");
+  // Wallet Management Endpoints
 
-      // The sponsor keypair is only used here to derive the public key for the
-      // wallet creation flow; the actual signing goes through FeeSponsorService.
-      const sponsorKeypair = Keypair.fromPublicKey(
-        opts.feePayerSigner.publicKey()
-      );
-      const wallet = new Wallet({
-        client,
-        sponsorKeypair,
-        serverPublicKey: opts.cosignerSigner.publicKey(),
-      });
+  app.post("/wallet/create", wrapHandler(async (req: Request, res: Response) => {
+    const { Wallet } = await import("@lumen/core");
 
-      const result = await wallet.create();
-      res.json({
-        address: result.address,
-        publicKey: result.publicKey,
-        devicePublicKey: result.publicKey,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+    const sponsorKeypair = Keypair.fromPublicKey(opts.cosignerSigner.publicKey());
+    const wallet = new Wallet({
+      client,
+      sponsorKeypair,
+      serverPublicKey: opts.cosignerSigner.publicKey(),
+    });
 
-  app.listen(port, () => {
+    const result = await wallet.create();
+
+    const userDevicePublicKey =
+      req.body?.userDevicePublicKey ||
+      (req.headers["x-user-device-public-key"] as string) ||
+      result.publicKey;
+
+    const record: WalletRecord = {
+      id: crypto.randomUUID(),
+      address: result.address,
+      userDevicePublicKey,
+      createdAt: new Date(),
+    };
+
+    walletStore.addWallet(record);
+
+    res.json({
+      id: record.id,
+      address: record.address,
+      userDevicePublicKey: record.userDevicePublicKey,
+      createdAt: record.createdAt,
+    });
+  }));
+
+  app.get(
+    "/wallet/by-address/:address",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallets/:address",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallet/:id",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWallet(req.params.id);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found with id: ${req.params.id}`);
+      }
+      res.json(record);
+    })
+  );
+
+  app.get(
+    "/wallets",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+      const cursor = req.query.cursor ? (req.query.cursor as string) : undefined;
+      const result = walletStore.listWallets(limit, cursor);
+      res.json(result);
+    })
+  );
+
+  app.delete(
+    "/wallet/:id",
+    requireApiKey,
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWallet(req.params.id);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found with id: ${req.params.id}`);
+      }
+
+      // Submit setOptions on-chain to remove server co-signer (set weight to 0)
+      try {
+        const account = await client.horizon.loadAccount(record.address);
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: client.networkPassphrase,
+        })
+          .addOperation(
+            Operation.setOptions({
+              signer: {
+                ed25519PublicKey: opts.cosignerSigner.publicKey(),
+                weight: 0,
+              },
+            })
+          )
+          .setTimeout(180)
+          .build();
+
+        const signedXdr = await opts.cosignerSigner.signTransaction(tx.toXDR());
+        await client.horizon.submitTransaction(TransactionBuilder.fromXDR(signedXdr, client.networkPassphrase));
+      } catch (e) {
+        // Log on-chain attempt warning, continue deleting store record
+        console.warn(`on-chain co-signer removal warning for wallet ${record.address}:`, e);
+      }
+
+      walletStore.deleteWallet(req.params.id);
+      res.json({ success: true, message: "Server co-signer removed and wallet deleted" });
+    })
+  );
+
+  // Optional SEP-10 challenge flow endpoints for proof-of-ownership
+  app.get(
+    "/wallets/:address/sign-challenge",
+    wrapHandler(async (req: Request, res: Response) => {
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      const challengeTx = new TransactionBuilder(
+        new Keypair({ publicKey: () => record.address, secret: () => "" } as any).toAccount(),
+        {
+          fee: BASE_FEE,
+          networkPassphrase: client.networkPassphrase,
+        }
+      )
+        .addOperation(
+          Operation.manageData({
+            name: "Lumen Auth Challenge",
+            value: crypto.randomUUID(),
+          })
+        )
+        .setTimeout(300)
+        .build();
+
+      res.json({ challengeXdr: challengeTx.toXDR() });
+    })
+  );
+
+  app.post(
+    "/wallets/:address/verify",
+    wrapHandler(async (req: Request, res: Response) => {
+      const { challengeXdr } = req.body;
+      if (!challengeXdr) {
+        throw new ValidationError("challengeXdr is required");
+      }
+      const record = walletStore.getWalletByAddress(req.params.address);
+      if (!record) {
+        throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
+      }
+      res.json({ verified: true, wallet: record });
+    })
+  );
+
+  app.use(errorHandler);
+
+  const server = createHttpServer(app);
+
+  server.listen(port, () => {
     console.log(`Lumen server listening on port ${port}`);
     console.log(`Network: ${client.config.network}`);
     console.log(`Cosigner: ${opts.cosignerSigner.publicKey()}`);
     console.log(`Fee payer: ${opts.feePayerSigner.publicKey()}`);
   });
 
-  return { app, client, cosignerService, feeSponsorService, policyEngine };
+  const gracefulShutdown = (signal: string) => {
+    console.log(`${signal} received, shutting down gracefully`);
+
+    server.close(() => {
+      console.log("HTTP server closed");
+      process.exit(0);
+    });
+
+    const timeout = setTimeout(() => {
+      console.error("Forced shutdown after timeout");
+      process.exit(1);
+    }, 30000);
+
+    const checkInterval = setInterval(() => {
+      if (activeRequests === 0) {
+        clearInterval(checkInterval);
+        clearTimeout(timeout);
+        server.close(() => {
+          console.log("HTTP server closed");
+          process.exit(0);
+        });
+      }
+    }, 100);
+  };
+
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+  return { app, server, client, cosignerService, feeSponsorService, policyEngine, walletStore };
 }

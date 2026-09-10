@@ -423,8 +423,9 @@ Before going live with real user funds:
 - [ ] CloudTrail is enabled and log file validation is on
 - [ ] Structured audit logs are shipped to an immutable store
 - [ ] Fee-payer balance cap is configured with automated top-up
-- [ ] Low-balance and anomalous-volume alerts are active
-- [ ] Key rotation schedule is documented and rehearsed
+- [ ] Health probes `/healthz/live` (liveness) and `/healthz/ready` (readiness) configured in load balancer / container orchestrator
+- [ ] Low-balance alert threshold (`LOW_BALANCE_ALERT_THRESHOLD`) and timeout (`HEALTH_CHECK_TIMEOUT_MS`) configured
 - [ ] Incident response runbook (§10) has been reviewed by the team
 - [ ] `.env` is in `.gitignore` and no secrets are committed to version control
 - [ ] `STELLAR_NETWORK=mainnet` (not testnet) is set in the production environment
+

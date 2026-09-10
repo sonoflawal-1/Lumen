@@ -8,6 +8,7 @@
     "build": "tsc",
     "dev": "node --watch dist/main.js",
     "start": "node dist/main.js",
+    "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -15,7 +16,8 @@
     "@lumen/types": "workspace:*",
     "@lumen/core": "workspace:*",
     "@stellar/stellar-sdk": "^16.0.1",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

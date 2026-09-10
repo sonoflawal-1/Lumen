@@ -47,7 +47,9 @@
  * const feePayer = await AwsKmsSigner.fromEnv("KMS_FEE_PAYER_KEY_ID");
  * ```
  */
+import { KMSClient, GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
 import type { Signer } from "@lumen/types";
+import { StrKey } from "@stellar/stellar-sdk";
 
 export class AwsKmsSigner implements Signer {
   private readonly keyId: string;
@@ -84,62 +86,32 @@ export class AwsKmsSigner implements Signer {
     return signer;
   }
 
-  /**
-   * Returns the Stellar public key (G…) derived from the KMS key.
-   *
-   * TODO: implement using @aws-sdk/client-kms
-   *
-   * ```ts
-   * import { KMSClient, GetPublicKeyCommand } from "@aws-sdk/client-kms";
-   *
-   * const client = new KMSClient({ region: this.region });
-   * const response = await client.send(
-   *   new GetPublicKeyCommand({ KeyId: this.keyId })
-   * );
-   * // response.PublicKey is a DER-encoded SubjectPublicKeyInfo.
-   * // Parse it with @noble/curves or a DER decoder to extract the raw 32-byte
-   * // Ed25519 public key, then convert to Stellar strkey:
-   * //   import { StrKey } from "@stellar/stellar-sdk";
-   * //   return StrKey.encodeEd25519PublicKey(rawPubkeyBytes);
-   * ```
-   */
-  publicKey(): string {
+  async publicKey(): string {
     if (this.cachedPublicKey) return this.cachedPublicKey;
-    // TODO: replace with real KMS GetPublicKey call (see JSDoc above).
-    throw new Error(
-      "AwsKmsSigner.publicKey() is not yet implemented. " +
-        "See packages/server/src/signers/AwsKmsSigner.ts for integration guidance."
+    const client = new KMSClient({ region: this.region });
+    const derPublicKey = await client.send(
+      new GetPublicKeyCommand({ KeyId: this.keyId })
     );
+    const rawPubkeyBytes = derPublicKey.PublicKey as Buffer;
+    return StrKey.encodeEd25519PublicKey(rawPubkeyBytes);
   }
 
-  /**
-   * Signs the 32-byte Stellar transaction hash via KMS.
-   *
-   * TODO: implement using @aws-sdk/client-kms
-   *
-   * ```ts
-   * import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
-   *
-   * const client = new KMSClient({ region: this.region });
-   * const response = await client.send(
-   *   new SignCommand({
-   *     KeyId: this.keyId,
-   *     Message: payload,
-   *     MessageType: "RAW",
-   *     // Ed25519 does not require a separate hash step; pass RAW.
-   *     SigningAlgorithm: "ECDSA_SHA_256",  // Replace with Ed25519 once supported.
-   *   })
-   * );
-   * // response.Signature is the DER-encoded signature; decode to 64-byte raw
-   * // (r || s) form that Stellar expects.
-   * return response.Signature!;
-   * ```
-   */
-  async sign(_payload: Uint8Array): Promise<Uint8Array> {
-    // TODO: replace with real KMS Sign call (see JSDoc above).
-    throw new Error(
-      "AwsKmsSigner.sign() is not yet implemented. " +
-        "See packages/server/src/signers/AwsKmsSigner.ts for integration guidance."
+  async sign(payload: Uint8Array): Promise<Uint8Array> {
+    const client = new KMSClient({ region: this.region });
+    const response = await client.send(
+      new SignCommand({
+        KeyId: this.keyId,
+        Message: payload,
+        MessageType: "RAW",
+        SigningAlgorithm: "ECDSA_SHA_256",
+      })
     );
+    const derSignature = response.Signature as Buffer;
+    const signatureBytes = new Uint8Array(
+      derSignature.buffer,
+      derSignature.byteOffset,
+      derSignature.byteLength
+    );
+    return signatureBytes;
   }
 }

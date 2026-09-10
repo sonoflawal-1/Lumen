@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Keypair, Networks, Asset, BASE_FEE, TransactionBuilder, Operation } from "@stellar/stellar-sdk";
 import { StellarClient } from "../stellar/client.js";
 import { createSponsoredAccount } from "../stellar/account.js";
@@ -152,24 +152,24 @@ describe("KeyManager", () => {
     expect(kp.secret()).toBeDefined();
   });
 
-  it("stores and loads a key", () => {
+  it("stores and loads a key", async () => {
     const km = new KeyManager();
     const kp = Keypair.random();
 
-    const stored = km.store(kp, "test");
+    const stored = await km.store(kp, "test");
     expect(stored.publicKey).toBe(kp.publicKey());
 
-    const loaded = km.load(kp.publicKey(), "test");
+    const loaded = await km.load(kp.publicKey(), "test");
     expect(loaded.publicKey()).toBe(kp.publicKey());
   });
 
-  it("lists stored keys", () => {
+  it("lists stored keys", async () => {
     const km = new KeyManager();
     const kp1 = Keypair.random();
     const kp2 = Keypair.random();
 
-    km.store(kp1, "test");
-    km.store(kp2, "test");
+    await km.store(kp1, "test");
+    await km.store(kp2, "test");
 
     const keys = km.list();
     expect(keys).toHaveLength(2);
