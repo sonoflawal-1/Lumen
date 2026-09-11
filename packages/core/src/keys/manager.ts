@@ -4,6 +4,8 @@ export interface StoredKey {
   publicKey: string;
   encryptedSecret: string;
   createdAt: Date;
+  salt?: string;
+  provider?: string;
 }
 
 export class KeyManager {
@@ -16,21 +18,42 @@ export class KeyManager {
   async deriveFromOAuth(
     provider: string,
     token: string,
-    salt?: string
+    salt?: string,
+    walletId?: string
   ): Promise<Keypair> {
     const encoder = new TextEncoder();
+
     const keyMaterial = await crypto.subtle.importKey(
       "raw",
       encoder.encode(token),
-      { name: "HMAC", hash: "SHA-256" },
+      "HKDF",
       false,
-      ["sign"]
+      ["deriveBits"]
     );
 
-    const data = encoder.encode(`${provider}:${salt ?? "lumen-derivation"}`);
-    const signature = await crypto.subtle.sign("HMAC", keyMaterial, data);
-    const seed = Buffer.from(new Uint8Array(signature).slice(0, 32));
+    let saltBytes: Uint8Array;
+    if (salt) {
+      saltBytes = encoder.encode(salt);
+    } else {
+      const randomBuf = crypto.getRandomValues(new Uint8Array(16));
+      saltBytes = randomBuf;
+    }
 
+    const infoString = `lumen:ed25519:${provider}:${walletId ?? "default"}`;
+    const infoBytes = encoder.encode(infoString);
+
+    const derivedBits = await crypto.subtle.deriveBits(
+      {
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: saltBytes,
+        info: infoBytes,
+      },
+      keyMaterial,
+      256
+    );
+
+    const seed = Buffer.from(new Uint8Array(derivedBits));
     return Keypair.fromRawEd25519Seed(seed);
   }
 
@@ -73,6 +96,8 @@ export class KeyManager {
       publicKey: key.publicKey(),
       encryptedSecret,
       createdAt: new Date(),
+      salt,
+      provider,
     };
     this.keys.set(key.publicKey(), stored);
     return stored;

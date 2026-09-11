@@ -1,4 +1,13 @@
-import { Keypair, Asset, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
+import {
+  Keypair,
+  Asset,
+  Operation,
+  TransactionBuilder,
+  BASE_FEE,
+  Memo,
+  Account,
+  Transaction,
+} from "@stellar/stellar-sdk";
 import type { StellarClient } from "../stellar/client.js";
 import { createSponsoredAccount } from "../stellar/account.js";
 import { setupMultisig } from "../stellar/multisig.js";
@@ -8,6 +17,17 @@ export interface WalletOpts {
   client: StellarClient;
   sponsorKeypair: Keypair;
   serverPublicKey: string;
+}
+
+export interface SendOpts {
+  destination?: string;
+  asset?: Asset;
+  amount?: string;
+  memo?: Memo | string | number | Buffer;
+  timebounds?: { minTime?: number | string; maxTime?: number | string } | number;
+  baseFee?: number | string;
+  extraOperations?: Operation[];
+  sequenceNumber?: string;
 }
 
 export class Wallet {
