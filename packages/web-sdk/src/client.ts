@@ -1,4 +1,4 @@
-import { Keypair, Asset } from "@stellar/stellar-sdk";
+import { Keypair, Asset, TransactionBuilder, Operation, BASE_FEE } from "@stellar/stellar-sdk";
 import { StellarClient, Wallet, KNOWN_ASSETS } from "@lumen/core";
 import type { StellarNetwork, WalletRecord } from "@lumen/types";
 
@@ -26,10 +26,19 @@ export class LumenClient {
       horizonUrl: opts.horizonUrl,
       rpcUrl: opts.rpcUrl,
     });
-    this.serverUrl = opts.serverUrl.replace(/\/$/, "");
+    this.serverUrl = (opts.serverUrl ?? "http://localhost:3000").replace(/\/$/, "");
     this.serverPublicKey = opts.serverPublicKey;
-    this.serverUrl = opts.serverUrl ?? "http://localhost:3000";
     this.apiKey = opts.apiKey;
+    this.sponsorKeypair = Keypair.fromSecret(opts.sponsorSecret);
+  }
+
+  private authHeaders(apiKey?: string): Record<string, string> {
+    const key = apiKey ?? this.apiKey;
+    const headers: Record<string, string> = {};
+    if (key) {
+      headers["x-api-key"] = key;
+    }
+    return headers;
   }
 
   async createWallet(userDevicePublicKey?: string): Promise<{ address: string; id: string; userDevicePublicKey?: string }> {
@@ -39,26 +48,30 @@ export class LumenClient {
       serverPublicKey: this.serverPublicKey,
     });
 
+    const res = await fetch(`${this.serverUrl}/wallet`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this.authHeaders() },
+      body: JSON.stringify({
+        userDevicePublicKey: userDevicePublicKey ?? wallet.publicKey,
+      }),
+    });
+
     if (!res.ok) {
-      throw new Error(`Failed to create wallet on server: ${res.statusText}`);
+      throw new Error(`Failed to create wallet on server: ${res.status} ${res.statusText}`);
     }
 
     const data = (await res.json()) as { id: string; address: string };
-    const entry: ClientWalletEntry = {
-      id: data.id,
-      address: data.address,
-    };
 
-    this.wallets.set(data.id, entry);
-    this.wallets.set(data.address, entry);
+    this.wallets.set(data.id, wallet);
+    this.wallets.set(data.address, wallet);
 
-    return { address, id, userDevicePublicKey: userDevicePublicKey ?? address };
+    return { address: data.address, id: data.id, userDevicePublicKey: userDevicePublicKey ?? wallet.publicKey };
   }
 
   async getWallet(
     id: string
   ): Promise<{ id: string; address: string; createdAt?: string; policyId?: string }> {
-    const res = await fetch(`${this.serverUrl}/wallet/${id}`);
+    const res = await fetch(`${this.serverUrl}/wallet/${id}`, { headers: this.authHeaders() });
     if (!res.ok) {
       throw new Error(`Wallet not found: ${id}`);
     }
@@ -70,13 +83,16 @@ export class LumenClient {
       policyId?: string;
     };
 
-    const entry: ClientWalletEntry = {
-      id: data.id,
-      address: data.address,
-    };
-
-    this.wallets.set(data.id, entry);
-    this.wallets.set(data.address, entry);
+    if (!this.wallets.has(data.id) && !this.wallets.has(data.address)) {
+      const wallet = new Wallet({
+        client: this.client,
+        sponsorKeypair: this.sponsorKeypair,
+        serverPublicKey: this.serverPublicKey,
+      });
+      (wallet as any)._address = data.address;
+      this.wallets.set(data.id, wallet);
+      this.wallets.set(data.address, wallet);
+    }
 
     return data;
   }
@@ -105,16 +121,11 @@ export class LumenClient {
   }
 
   async recoverWallets(serverUrl?: string, apiKey?: string): Promise<WalletRecord[]> {
-    const baseUrl = serverUrl ?? this.serverUrl;
-    const key = apiKey ?? this.apiKey;
-    const headers: Record<string, string> = {};
-    if (key) {
-      headers["x-api-key"] = key;
-    }
+    const baseUrl = (serverUrl ?? this.serverUrl).replace(/\/$/, "");
 
-    const res = await fetch(`${baseUrl}/wallets`, { headers });
+    const res = await fetch(`${baseUrl}/wallets`, { headers: this.authHeaders(apiKey) });
     if (!res.ok) {
-      throw new Error(`Failed to recover wallets from server: ${res.statusText}`);
+      throw new Error(`Failed to recover wallets from server: ${res.status} ${res.statusText}`);
     }
 
     const data = (await res.json()) as { items: WalletRecord[] };
@@ -138,19 +149,14 @@ export class LumenClient {
   }
 
   async lookupByAddress(address: string, serverUrl?: string, apiKey?: string): Promise<WalletRecord | undefined> {
-    const baseUrl = serverUrl ?? this.serverUrl;
-    const key = apiKey ?? this.apiKey;
-    const headers: Record<string, string> = {};
-    if (key) {
-      headers["x-api-key"] = key;
-    }
+    const baseUrl = (serverUrl ?? this.serverUrl).replace(/\/$/, "");
 
-    const res = await fetch(`${baseUrl}/wallets/${address}`, { headers });
+    const res = await fetch(`${baseUrl}/wallets/${address}`, { headers: this.authHeaders(apiKey) });
     if (res.status === 404) {
       return undefined;
     }
     if (!res.ok) {
-      throw new Error(`Failed to lookup wallet by address: ${res.statusText}`);
+      throw new Error(`Failed to lookup wallet by address: ${res.status} ${res.statusText}`);
     }
 
     return (await res.json()) as WalletRecord;
@@ -160,7 +166,10 @@ export class LumenClient {
     let wallet = this.wallets.get(id);
     if (!wallet) {
       const fetched = await this.getWallet(id);
-      wallet = { id: fetched.id, address: fetched.address };
+      wallet = this.wallets.get(fetched.id) ?? this.wallets.get(fetched.address);
+    }
+    if (!wallet) {
+      throw new Error(`Wallet not available: ${id}`);
     }
 
     const account = await this.client.horizon.loadAccount(wallet.address);
@@ -193,7 +202,10 @@ export class LumenClient {
     let wallet = this.wallets.get(id);
     if (!wallet) {
       const fetched = await this.getWallet(id);
-      wallet = { id: fetched.id, address: fetched.address };
+      wallet = this.wallets.get(fetched.id) ?? this.wallets.get(fetched.address);
+    }
+    if (!wallet) {
+      throw new Error(`Wallet not available: ${id}`);
     }
 
     let asset: Asset;
@@ -226,8 +238,9 @@ export class LumenClient {
       .setTimeout(180)
       .build();
 
-    if (wallet.keypair) {
-      tx.sign(wallet.keypair);
+    const keypair = wallet.keypair;
+    if (keypair) {
+      tx.sign(keypair);
     }
 
     // 1. Request co-signing from Lumen server
@@ -242,7 +255,7 @@ export class LumenClient {
 
     if (!cosignRes.ok) {
       const err = await cosignRes.json().catch(() => ({ error: cosignRes.statusText }));
-      throw new Error(`Co-signing failed: ${(err as any).error ?? cosignRes.statusText}`);
+      throw new Error(`Co-signing failed: ${(err as any).error ?? `${cosignRes.status} ${cosignRes.statusText}`}`);
     }
 
     const cosignData = (await cosignRes.json()) as { signedXdr: string };
@@ -259,7 +272,7 @@ export class LumenClient {
 
     if (!feeBumpRes.ok) {
       const err = await feeBumpRes.json().catch(() => ({ error: feeBumpRes.statusText }));
-      throw new Error(`Fee-bump submission failed: ${(err as any).error ?? feeBumpRes.statusText}`);
+      throw new Error(`Fee-bump submission failed: ${(err as any).error ?? `${feeBumpRes.status} ${feeBumpRes.statusText}`}`);
     }
 
     const feeBumpData = (await feeBumpRes.json()) as { hash: string };

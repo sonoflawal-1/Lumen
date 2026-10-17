@@ -11,4 +11,4 @@ dev-stellar-logs:
 
 test-integration:
 	docker compose -f docker/docker-compose.yml up -d
-	pnpm test
+	pnpm integration

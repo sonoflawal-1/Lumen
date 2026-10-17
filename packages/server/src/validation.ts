@@ -40,11 +40,19 @@ export const PolicyRequestSchema = z.object({
 });
 
 export const WalletsQuerySchema = z.object({
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(10),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).optional(),
+});
+
+export const WalletCreateRequestSchema = z.object({
+  userDevicePublicKey: z
+    .string()
+    .regex(/^G[A-Z2-7]{55}$/, "userDevicePublicKey must be a valid Stellar public key")
+    .optional(),
 });
 
 export type CosignRequest = z.infer<typeof CosignRequestSchema>;
 export type FeeBumpRequest = z.infer<typeof FeeBumpRequestSchema>;
 export type PolicyRequest = z.infer<typeof PolicyRequestSchema>;
 export type WalletsQuery = z.infer<typeof WalletsQuerySchema>;
+export type WalletCreateRequest = z.infer<typeof WalletCreateRequestSchema>;

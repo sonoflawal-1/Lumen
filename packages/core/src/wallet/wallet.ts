@@ -48,6 +48,7 @@ export class Wallet {
   dispose(): void {
     this._keypair = null;
     this._address = null;
+    this.keyManager.clear();
   }
 
   isDisposed(): boolean {

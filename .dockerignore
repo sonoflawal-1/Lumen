@@ -3,7 +3,12 @@ node_modules
 .gitignore
 .turbo
 dist
+build
 coverage
 .env
 .env.*
 *.log
+logs
+.DS_Store
+.vscode
+.idea

@@ -51,4 +51,72 @@ describe("Wallet Secret Disposal (Issue 3)", () => {
       "Wallet not initialized or has been disposed"
     );
   });
+
+  it("does not leak secret material in errors thrown after dispose()", async () => {
+    const client = new StellarClient({ network: "local" });
+    const sponsorKeypair = Keypair.random();
+    const serverKeypair = Keypair.random();
+
+    const wallet = new Wallet({
+      client,
+      sponsorKeypair,
+      serverPublicKey: serverKeypair.publicKey(),
+    });
+
+    const secretKeypair = Keypair.random();
+    const secretSeed = secretKeypair.secret();
+    (wallet as any)._keypair = secretKeypair;
+    (wallet as any)._address = secretKeypair.publicKey();
+
+    wallet.dispose();
+
+    // address getter must throw a safe message
+    let addressError: unknown;
+    try {
+      void wallet.address;
+    } catch (err) {
+      addressError = err;
+    }
+    expect(addressError).toBeInstanceOf(Error);
+    expect((addressError as Error).message).toBe(
+      "Wallet not created or has been disposed"
+    );
+    expect((addressError as Error).message).not.toContain(secretSeed);
+
+    // send() must reject with a safe message
+    let sendError: unknown;
+    try {
+      await wallet.send("GDESTINATION...", {} as any, "100");
+    } catch (err) {
+      sendError = err;
+    }
+    expect(sendError).toBeInstanceOf(Error);
+    expect((sendError as Error).message).toBe(
+      "Wallet not initialized or has been disposed"
+    );
+    expect((sendError as Error).message).not.toContain(secretSeed);
+  });
+
+  it("dispose() is idempotent and leaves _keypair null", () => {
+    const client = new StellarClient({ network: "local" });
+    const sponsorKeypair = Keypair.random();
+    const serverKeypair = Keypair.random();
+
+    const wallet = new Wallet({
+      client,
+      sponsorKeypair,
+      serverPublicKey: serverKeypair.publicKey(),
+    });
+
+    (wallet as any)._keypair = Keypair.random();
+    (wallet as any)._address = (wallet as any)._keypair.publicKey();
+
+    wallet.dispose();
+    expect((wallet as any)._keypair).toBeNull();
+
+    // Second dispose must not throw and must keep _keypair null
+    expect(() => wallet.dispose()).not.toThrow();
+    expect((wallet as any)._keypair).toBeNull();
+    expect(wallet.isDisposed()).toBe(true);
+  });
 });

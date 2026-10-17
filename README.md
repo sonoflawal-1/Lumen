@@ -104,25 +104,36 @@ pnpm install
 
 ### 2. Start the local Stellar network
 
+The repo ships a `docker/docker-compose.yml` that runs the Stellar quickstart image with named volumes (so your local network survives container restarts), the correct `platform: linux/amd64` for Apple Silicon, and all the ports you need for debugging.
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
+Or use the wrapper script:
+
 ```bash
 pnpm dev:stellar
 ```
 
-> Or run using `docker compose`:
-> ```bash
-> docker compose -f docker/docker-compose.yml up -d
-> ```
-
 <details>
-<summary>Raw docker run command (standalone container)</summary>
+<summary>Raw docker run command (for users who can't use compose)</summary>
 
 ```bash
 docker run --rm -p 8000:8000 -p 8080:8080 -p 6000:6000 --platform linux/amd64 stellar/quickstart:testing --local --enable-stellar-rpc
 ```
 
-For full details on local environment ports (`8000`, `8080`, `6000`) and network configuration, see [docs/local-development.md](docs/local-development.md).
+Note: this form does **not** persist the network across container restarts and requires `--platform linux/amd64` on Apple Silicon.
 
 </details>
+
+| Port | Service |
+| --- | --- |
+| `8000` | Horizon / Stellar RPC |
+| `8080` | Stellar Core HTTP |
+| `6000` | Stellar Core peer port |
+
+For full details on local environment ports and network configuration, see [docs/local-development.md](docs/local-development.md).
 
 ### 3. Docker Management Scripts
 
@@ -170,6 +181,39 @@ pnpm --filter @lumen/server dev
 | `/wallets/:address` | GET | API Key | Retrieve single wallet by address for SDK recovery |
 | `/wallet/:id` | DELETE | API Key | Remove server co-signer on-chain (`setOptions` weight 0) and delete wallet record |
 
+---
+
+## Wallet recovery
+
+Wallets are 2-of-2 multisig accounts, so a page refresh only loses the SDK's in-memory map — the account itself is intact. The server persists a wallet registry and exposes it so the SDK can rehydrate:
+
+| Endpoint | Method | Auth | Description |
+| --- | --- | --- | --- |
+| `/wallets` | GET | API Key | List all wallets the server has sponsored |
+| `/wallets/:address` | GET | API Key | Fetch a single wallet by Stellar address, including `userDevicePublicKey` |
+| `/wallet/:id` | GET | API Key | Fetch a single wallet by UUID |
+| `/wallet/by-address/:address` | GET | API Key | Fetch a single wallet by Stellar address |
+| `/wallet/:id` | DELETE | API Key | Remove the server co-signer and hand control back to the device key |
+
+On the SDK side:
+
+```ts
+const client = new LumenClient({ /* ... */ });
+
+// Rebuild the in-memory wallet map from the server registry
+await client.recoverWallets();
+
+// Look up a single wallet by its Stellar address
+const wallet = await client.lookupByAddress('G...');
+```
+
+See [docs/recovery.md](docs/recovery.md) for the full recovery flow, including the optional SEP-10-style challenge/verify handshake.
+
+---
+
+## Key lifecycle
+
+Device keypairs live in memory only for as long as they are needed. Call `wallet.dispose()` (or `client.close()`) to drop the keypair reference and clear the SDK's wallet map. See [docs/key-lifecycle.md](docs/key-lifecycle.md) for lifetime expectations and zeroization guidance.
 
 ---
 
@@ -179,7 +223,7 @@ pnpm --filter @lumen/server dev
 | --- | --- |
 | **`@lumen/core`** | `StellarClient`, `createSponsoredAccount`, `setupMultisig`, `buildFeeBump`, `pathPayment`, `KeyManager`, `Wallet` |
 | **`@lumen/server`** | `CosignerService`, `FeeSponsorService`, `PolicyEngine`, `AuditLogger`, Express API |
-| **`@lumen/web-sdk`** | `LumenClient`: `createWallet`, `getBalance`, `sendPayment` |
+| **`@lumen/web-sdk`** | `LumenClient`: `createWallet`, `getBalance`, `sendPayment`, `recoverWallets`, `lookupByAddress`, `close` |
 | **`@lumen/types`** | Shared TypeScript interfaces |
 
 ---

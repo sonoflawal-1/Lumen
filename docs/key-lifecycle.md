@@ -10,11 +10,19 @@ In JavaScript engines (V8, JavaScriptCore), native Ed25519 secret keys reside in
 2. **Explicit Disposal**: Call `.dispose()` on `Wallet` or `LumenClient` instances as soon as key operations complete.
 3. **No Key Leaks**: Secret keys are never logged, never included in error messages, and never passed through serialisation layers.
 
+## Key Lifetime Expectations
+
+- A `Wallet` holds its `Keypair` only for the lifetime of the instance. `Wallet.dispose()` sets `_keypair = null` and clears the cached `_address`, dropping all references to the secret material so the GC can reclaim it.
+- A `LumenClient` caches `Wallet` instances in an internal map. `LumenClient.dispose()` (alias `close()`) disposes every cached wallet and clears the map, so no `Wallet` (and therefore no `Keypair`) survives the client.
+- `@lumen/web-sdk` installs a global uncaught-exception / unhandled-rejection handler that disposes all wallets before rethrowing, so a crash does not leave secrets resident for the lifetime of the tab.
+- Error paths in `send`, `getBalance`, and `create` never include secret material; any `S...` 56-character Ed25519 seed string is redacted before an `Error` is constructed.
+- Stretch goal: investigate a `@noble/curves`-based `SecretKey` wrapper exposing `zeroize()` to overwrite the raw seed buffer in place.
+
 ## Key Disposal Patterns
 
 ### 1. Disposing Individual Wallets
 
-Call `wallet.dispose()` or `client.disposeWallet(walletId)` to zero out internal references to the `Keypair` and mark the wallet as disposed:
+Call `wallet.dispose()` or `client.disposeWallet(walletId)` to null out internal references to the `Keypair` (and the cached address) and mark the wallet as disposed:
 
 ```typescript
 import { LumenClient } from "@lumen/web-sdk";
