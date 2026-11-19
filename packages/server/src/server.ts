@@ -5,7 +5,13 @@ import express, {
   type NextFunction,
 } from "express";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { Keypair, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Keypair,
+  Operation,
+  TransactionBuilder,
+  BASE_FEE,
+} from "@stellar/stellar-sdk";
 import { StellarClient } from "@lumen/core";
 import type { Signer, WalletRecord } from "@lumen/types";
 import { CosignerService } from "./cosigner/service.js";
@@ -184,9 +190,10 @@ export function createServer(opts: ServerOpts): ServerResult {
 
     const result = await wallet.create();
 
+    const headerDeviceKey = req.headers["x-user-device-public-key"];
     const userDevicePublicKey =
-      req.body?.userDevicePublicKey ||
-      (req.headers["x-user-device-public-key"] as string) ||
+      (typeof req.body?.userDevicePublicKey === "string" && req.body.userDevicePublicKey) ||
+      (typeof headerDeviceKey === "string" && headerDeviceKey) ||
       result.publicKey;
 
     const record: WalletRecord = {
@@ -281,10 +288,15 @@ export function createServer(opts: ServerOpts): ServerResult {
           .build();
 
         const signedXdr = await opts.cosignerSigner.signTransaction(tx.toXDR());
-        await client.horizon.submitTransaction(TransactionBuilder.fromXDR(signedXdr, client.networkPassphrase));
+        await client.horizon.submitTransaction(
+          TransactionBuilder.fromXDR(signedXdr, client.networkPassphrase)
+        );
       } catch (e) {
-        // Log on-chain attempt warning, continue deleting store record
-        console.warn(`on-chain co-signer removal warning for wallet ${record.address}:`, e);
+        // Log on-chain attempt warning (address only, no secret material), continue deleting store record
+        const reason = e instanceof Error ? e.message : "unknown error";
+        console.warn(
+          `on-chain co-signer removal warning for wallet ${record.address}: ${reason}`
+        );
       }
 
       walletStore.deleteWallet(req.params.id);
@@ -301,7 +313,7 @@ export function createServer(opts: ServerOpts): ServerResult {
         throw new NotFoundError(`Wallet not found for address: ${req.params.address}`);
       }
       const challengeTx = new TransactionBuilder(
-        new Keypair({ publicKey: () => record.address, secret: () => "" } as any).toAccount(),
+        new Account(record.address, "0"),
         {
           fee: BASE_FEE,
           networkPassphrase: client.networkPassphrase,
