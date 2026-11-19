@@ -1,4 +1,4 @@
-import { Keypair, Asset } from "@stellar/stellar-sdk";
+import { Keypair, Asset, TransactionBuilder, Operation, BASE_FEE } from "@stellar/stellar-sdk";
 import { StellarClient, Wallet, KNOWN_ASSETS } from "@lumen/core";
 import type { StellarNetwork, WalletRecord } from "@lumen/types";
 
@@ -26,10 +26,10 @@ export class LumenClient {
       horizonUrl: opts.horizonUrl,
       rpcUrl: opts.rpcUrl,
     });
-    this.serverUrl = opts.serverUrl.replace(/\/$/, "");
     this.serverPublicKey = opts.serverPublicKey;
-    this.serverUrl = opts.serverUrl ?? "http://localhost:3000";
+    this.serverUrl = (opts.serverUrl ?? "http://localhost:3000").replace(/\/$/, "");
     this.apiKey = opts.apiKey;
+    this.sponsorKeypair = Keypair.fromSecret(opts.sponsorSecret);
   }
 
   async createWallet(userDevicePublicKey?: string): Promise<{ address: string; id: string; userDevicePublicKey?: string }> {
@@ -39,20 +39,25 @@ export class LumenClient {
       serverPublicKey: this.serverPublicKey,
     });
 
+    const res = await fetch(`${this.serverUrl}/wallet`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userDevicePublicKey: userDevicePublicKey ?? wallet.publicKey,
+      }),
+    });
+
     if (!res.ok) {
       throw new Error(`Failed to create wallet on server: ${res.statusText}`);
     }
 
     const data = (await res.json()) as { id: string; address: string };
-    const entry: ClientWalletEntry = {
-      id: data.id,
-      address: data.address,
-    };
+    const address = data.address;
 
-    this.wallets.set(data.id, entry);
-    this.wallets.set(data.address, entry);
+    this.wallets.set(data.id, wallet);
+    this.wallets.set(address, wallet);
 
-    return { address, id, userDevicePublicKey: userDevicePublicKey ?? address };
+    return { address, id: data.id, userDevicePublicKey: userDevicePublicKey ?? wallet.publicKey };
   }
 
   async getWallet(
@@ -70,13 +75,17 @@ export class LumenClient {
       policyId?: string;
     };
 
-    const entry: ClientWalletEntry = {
-      id: data.id,
-      address: data.address,
-    };
+    let wallet = this.wallets.get(data.id) ?? this.wallets.get(data.address);
+    if (!wallet) {
+      wallet = new Wallet({
+        client: this.client,
+        sponsorKeypair: this.sponsorKeypair,
+        serverPublicKey: this.serverPublicKey,
+      });
+    }
 
-    this.wallets.set(data.id, entry);
-    this.wallets.set(data.address, entry);
+    this.wallets.set(data.id, wallet);
+    this.wallets.set(data.address, wallet);
 
     return data;
   }
@@ -160,7 +169,10 @@ export class LumenClient {
     let wallet = this.wallets.get(id);
     if (!wallet) {
       const fetched = await this.getWallet(id);
-      wallet = { id: fetched.id, address: fetched.address };
+      wallet = this.wallets.get(fetched.id) ?? this.wallets.get(fetched.address);
+    }
+    if (!wallet) {
+      throw new Error(`Wallet not found: ${id}`);
     }
 
     const account = await this.client.horizon.loadAccount(wallet.address);
@@ -193,7 +205,10 @@ export class LumenClient {
     let wallet = this.wallets.get(id);
     if (!wallet) {
       const fetched = await this.getWallet(id);
-      wallet = { id: fetched.id, address: fetched.address };
+      wallet = this.wallets.get(fetched.id) ?? this.wallets.get(fetched.address);
+    }
+    if (!wallet) {
+      throw new Error(`Wallet not found: ${id}`);
     }
 
     let asset: Asset;
@@ -268,12 +283,15 @@ export class LumenClient {
 }
 
 export function setupGlobalErrorHandler(client: LumenClient): () => void {
-  const handleUncaught = () => {
+  const handleUncaught = (error: unknown) => {
     client.dispose();
+    throw error;
   };
 
+  let origOnError: OnErrorEventHandler | null = null;
+
   if (typeof window !== "undefined") {
-    const origOnError = window.onerror;
+    origOnError = window.onerror;
     window.onerror = (event, source, lineno, colno, error) => {
       client.dispose();
       if (origOnError) return origOnError(event, source, lineno, colno, error);
@@ -284,6 +302,9 @@ export function setupGlobalErrorHandler(client: LumenClient): () => void {
   }
 
   return () => {
+    if (typeof window !== "undefined" && origOnError !== null) {
+      window.onerror = origOnError;
+    }
     if (typeof process !== "undefined") {
       process.off("uncaughtException", handleUncaught);
     }

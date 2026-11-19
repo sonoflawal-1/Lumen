@@ -108,6 +108,10 @@ export class Wallet {
   async send(destination: string, asset: Asset, amount: string): Promise<{ hash: string }> {
     if (!this._keypair) throw new Error("Wallet not initialized or has been disposed");
 
+    // Capture the keypair in a local so it is not held in a long-lived closure
+    // and can be dropped as soon as the transaction is signed.
+    const keypair = this._keypair;
+
     try {
       const account = await this.client.horizon.loadAccount(this.address);
 
@@ -125,7 +129,7 @@ export class Wallet {
         .setTimeout(180)
         .build();
 
-      tx.sign(this._keypair);
+      tx.sign(keypair);
 
       const result = await this.client.horizon.submitTransaction(tx);
 

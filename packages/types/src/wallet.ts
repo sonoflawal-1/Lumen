@@ -20,3 +20,13 @@ export interface WalletRecord {
   createdAt: Date;
 }
 
+export interface WalletListResponse {
+  wallets: WalletRecord[];
+  nextCursor?: string;
+}
+
+export interface WalletCreateResponse {
+  id: string;
+  address: string;
+  userDevicePublicKey: string;
+}

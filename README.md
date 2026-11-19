@@ -75,6 +75,12 @@ User creates a wallet
 | `/fee-bump/submit` | POST | Wrap and submit fee-bumped transaction |
 | `/policy` | POST | Create/update policy rules for a wallet |
 | `/policy/:walletId` | GET | Fetch active policy for a wallet |
+| `/wallet/create` | POST | Sponsor and set up a new 2-of-2 multisig wallet; registers a wallet record and returns `{ id, address, userDevicePublicKey }` |
+| `/wallet/:id` | GET | Fetch a wallet record by UUID (API key required) |
+| `/wallet/by-address/:address` | GET | Fetch a wallet record by Stellar address (API key required) |
+| `/wallets` | GET | Paged wallet listing (`?limit=50&cursor=...`, API key required) |
+| `/wallets/:address` | GET | Fetch a single wallet by address, including the device public key (API key required) |
+| `/wallet/:id` | DELETE | Remove the server co-signer on-chain via `setOptions` (weight 0), transferring control back to the user device key (API key required) |
 
 ---
 
@@ -104,32 +110,37 @@ pnpm install
 
 ### 2. Start the local Stellar network
 
+The repo ships a compose file with named volumes (so your local network survives container restarts), the correct `platform: linux/amd64` for Apple Silicon, and port mappings for Horizon/RPC, Stellar Core HTTP, and the peer port.
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
+Or use the wrapper script:
+
 ```bash
 pnpm dev:stellar
 ```
 
-> Or run using `docker compose`:
-> ```bash
-> docker compose -f docker/docker-compose.yml up -d
-> ```
-
 <details>
-<summary>Raw docker run command (standalone container)</summary>
+<summary>Raw docker run command (fallback for users without Docker Compose)</summary>
 
 ```bash
 docker run --rm -p 8000:8000 -p 8080:8080 -p 6000:6000 --platform linux/amd64 stellar/quickstart:testing --local --enable-stellar-rpc
 ```
 
-For full details on local environment ports (`8000`, `8080`, `6000`) and network configuration, see [docs/local-development.md](docs/local-development.md).
+Note: this form does not use a named volume, so the local network resets every time the container stops.
 
 </details>
 
 ### 3. Docker Management Scripts
 
-- `pnpm dev:stellar`: Starts local Stellar Docker network container using compose.
-- `pnpm dev:stellar:down`: Brings down the local Stellar container.
-- `pnpm dev:stellar:logs`: Streams logs from the local Stellar container.
-- `pnpm test:integration`: Runs docker compose fixture and executes integration tests.
+- `pnpm dev:stellar`: Starts the local Stellar network via `docker compose -f docker/docker-compose.yml up -d`.
+- `pnpm dev:stellar:down`: Brings the network down via `docker compose -f docker/docker-compose.yml down`.
+- `pnpm dev:stellar:logs`: Streams logs via `docker compose -f docker/docker-compose.yml logs -f`.
+- `pnpm test:integration`: Runs the integration test suite against the compose fixture.
+
+For full details on local environment ports — `8000` (Horizon / Soroban RPC), `8080` (Stellar Core HTTP), and `6000` (peer port) — and network configuration, see [docs/local-development.md](docs/local-development.md).
 
 ### 4. Configure your environment
 
@@ -150,6 +161,17 @@ pnpm test
 ```bash
 pnpm --filter @lumen/server dev
 ```
+
+---
+
+## Wallet Recovery
+
+`LumenClient` keeps wallets in memory, so a page refresh normally loses them. The server persists a wallet registry (id, address, device public key, creation time) and exposes it so the SDK can rehydrate:
+
+- `LumenClient.recoverWallets()` — fetches `GET /wallets` and rebuilds the in-memory wallet map.
+- `LumenClient.lookupByAddress(address)` — calls `GET /wallets/:address` to fetch a single wallet, including the device public key so the client can verify it holds the matching key.
+
+See [docs/recovery.md](docs/recovery.md) for the full recovery flow, including the optional SEP-10-style challenge/verify handshake.
 
 ---
 
@@ -179,7 +201,7 @@ pnpm --filter @lumen/server dev
 | --- | --- |
 | **`@lumen/core`** | `StellarClient`, `createSponsoredAccount`, `setupMultisig`, `buildFeeBump`, `pathPayment`, `KeyManager`, `Wallet` |
 | **`@lumen/server`** | `CosignerService`, `FeeSponsorService`, `PolicyEngine`, `AuditLogger`, Express API |
-| **`@lumen/web-sdk`** | `LumenClient`: `createWallet`, `getBalance`, `sendPayment` |
+| **`@lumen/web-sdk`** | `LumenClient`: `createWallet`, `getBalance`, `sendPayment`, `recoverWallets`, `lookupByAddress` |
 | **`@lumen/types`** | Shared TypeScript interfaces |
 
 ---
